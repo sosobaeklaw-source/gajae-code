@@ -109,22 +109,30 @@ async function verifyVisibleDefinitions(): Promise<GateResult> {
 async function verifyMcpQuarantine(): Promise<GateResult> {
 	const codingPackage = await readJson("packages/coding-agent/package.json");
 	const exportsRecord = isRecord(codingPackage.exports) ? codingPackage.exports : {};
-	const exportedMcpKeys = Object.keys(exportsRecord).filter(key => key === "./mcp" || key.startsWith("./mcp/"));
-	const mcpPaths = [
+	const mcpExportKeys = Object.keys(exportsRecord).filter(key => key === "./mcp" || key.startsWith("./mcp/"));
+	const exposedMcpKeys = mcpExportKeys.filter(key => exportsRecord[key] !== null);
+	const blockedMcpKeys = mcpExportKeys.filter(key => exportsRecord[key] === null);
+	const builtinRegistry = await readText("packages/coding-agent/src/slash-commands/builtin-registry.ts");
+	const exposesMcpBuiltin = /name:\s*["']mcp["']/.test(builtinRegistry);
+	const importsMcpBuiltinHandler = builtinRegistry.includes("handleMcpAcp");
+	const internalMcpPaths = [
 		"packages/coding-agent/src/mcp",
 		"packages/coding-agent/src/modes/controllers/mcp-command-controller.ts",
 		"packages/coding-agent/src/modes/components/mcp-add-wizard.ts",
 		"packages/coding-agent/src/mcp/discoverable-tool-metadata.ts",
 	];
-	const presentMcpPaths = mcpPaths.filter(relativePath => fs.existsSync(path.join(repoRoot, relativePath)));
+	const presentInternalMcpPaths = internalMcpPaths.filter(relativePath => fs.existsSync(path.join(repoRoot, relativePath)));
 	const details = [
-		`exported MCP package keys: ${exportedMcpKeys.join(", ") || "<none>"}`,
-		`present MCP runtime/UI paths: ${presentMcpPaths.join(", ") || "<none>"}`,
+		`exposed MCP package keys: ${exposedMcpKeys.join(", ") || "<none>"}`,
+		`blocked MCP package keys: ${blockedMcpKeys.join(", ") || "<none>"}`,
+		`default /mcp builtin registered: ${exposesMcpBuiltin}`,
+		`default /mcp handler imported: ${importsMcpBuiltinHandler}`,
+		`private MCP implementation paths retained: ${presentInternalMcpPaths.join(", ") || "<none>"}`,
 	];
 
 	return {
 		name: "MCP quarantine/no default discoverable MCP",
-		passed: exportedMcpKeys.length === 0 && presentMcpPaths.length === 0,
+		passed: exposedMcpKeys.length === 0 && !exposesMcpBuiltin && !importsMcpBuiltinHandler,
 		details,
 	};
 }
