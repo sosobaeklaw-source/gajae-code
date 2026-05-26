@@ -12,6 +12,8 @@ Port when any of these are true:
 - The work is CPU-bound or blocking I/O that can run on the libuv thread pool.
 - The work is async I/O that can run on Tokio's runtime (for example shell execution).
 
+Rust is reserved for native bindings, native OS/process/filesystem integration, and measured hot paths. New crates or Rust source trees must have an explicit native/performance rationale in `scripts/check-rust-scope.ts`; keep product policy, orchestration, and glue code in TypeScript unless the benchmark or native boundary justifies moving it.
+
 Avoid ports that depend on JS-only state or dynamic imports. N-API exports should be data-in/data-out. Long-running work should go through `task::blocking` (CPU-bound/blocking I/O) or `task::future` (async I/O) with cancellation where the caller needs `timeoutMs` or `AbortSignal`.
 
 ## Current package shape
