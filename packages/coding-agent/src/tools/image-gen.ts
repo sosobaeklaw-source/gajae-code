@@ -1075,8 +1075,8 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					headers: {
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${apiKey.apiKey}`,
-						"HTTP-Referer": "https://omp.sh/",
-						"X-OpenRouter-Title": "Oh-My-Pi",
+						"HTTP-Referer": "https://gajae-code.dev/",
+						"X-OpenRouter-Title": "Gajae Code",
 						"X-OpenRouter-Categories": "cli-agent",
 					},
 					body: JSON.stringify(requestBody),
