@@ -150,7 +150,9 @@ function isIgnoredPath(relativePath: string): boolean {
 		relativePath.startsWith(".git/") ||
 		relativePath.startsWith(".omx/") ||
 		relativePath.startsWith("node_modules/") ||
-		relativePath.includes("/node_modules/")
+		relativePath.includes("/node_modules/") ||
+		relativePath.startsWith("target/") ||
+		relativePath.includes("/target/")
 	);
 }
 
