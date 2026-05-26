@@ -127,11 +127,11 @@ async function verifyDocsBranding(): Promise<GateResult> {
 	return {
 		name: "public docs current GJC/red-claw direction",
 		passed:
-			rootReadme.includes("The GJC red-claw agent") &&
+			rootReadme.includes("default dark TUI identity is the GJC red-claw theme") &&
 			packageReadme.includes("defaults to the bundled `red-claw`") &&
 			themeDoc.includes('theme.dark = "red-claw"'),
 		details: [
-			`README heading GJC-first: ${rootReadme.includes("The GJC red-claw agent")}`,
+			`README GJC red-claw default: ${rootReadme.includes("default dark TUI identity is the GJC red-claw theme")}`,
 			`package README default red-claw: ${packageReadme.includes("defaults to the bundled `red-claw`")}`,
 			`theme docs default red-claw: ${themeDoc.includes('theme.dark = "red-claw"')}`,
 		],
