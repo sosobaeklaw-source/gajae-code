@@ -701,7 +701,7 @@ export class AcpAgent implements Agent {
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 		const skillName = commandName.slice("skill:".length);
 		const skill = record.session.skills.find(candidate => candidate.name === skillName);
-		if (!skill) {
+		if (!skill || skill.hide === true) {
 			return false;
 		}
 		const built = await buildSkillPromptMessage(skill, args);
@@ -1406,6 +1406,7 @@ export class AcpAgent implements Agent {
 
 		if (session.skillsSettings?.enableSkillCommands) {
 			for (const skill of session.skills) {
+				if (skill.hide === true) continue;
 				appendCommand({
 					name: getSkillSlashCommandName(skill),
 					description: skill.description || `Run ${skill.name} skill`,

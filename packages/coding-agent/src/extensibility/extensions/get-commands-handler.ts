@@ -53,6 +53,7 @@ export function getSessionSlashCommands(session: CommandsCapableSession): SlashC
 
 	if (session.skillsSettings?.enableSkillCommands) {
 		for (const skill of session.skills) {
+			if (skill.hide === true) continue;
 			out.push({
 				name: getSkillSlashCommandName(skill),
 				description: skill.description || undefined,

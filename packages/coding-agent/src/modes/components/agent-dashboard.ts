@@ -45,7 +45,7 @@ import { Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
-import { discoverAgents } from "../../task/discovery";
+import { discoverAgents, filterVisibleAgents } from "../../task/discovery";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
@@ -392,7 +392,7 @@ export class AgentDashboard extends Container {
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 
-			this.#allAgents = agents
+			this.#allAgents = filterVisibleAgents(agents)
 				.slice()
 				.sort((a, b) => {
 					const sourceCmp = SOURCE_ORDER[a.source] - SOURCE_ORDER[b.source];

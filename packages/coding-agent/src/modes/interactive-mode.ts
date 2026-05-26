@@ -404,6 +404,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const skillCommandList: SlashCommand[] = [];
 		if (settings.get("skills.enableSkillCommands")) {
 			for (const skill of this.session.skills) {
+				if (skill.hide === true) continue;
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill.filePath);
 				skillCommandList.push({ name: commandName, description: skill.description });
