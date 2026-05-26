@@ -11,8 +11,8 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
-import type { MCPManager } from "../runtime-mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
+import type { MCPManager } from "../runtime-mcp";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
