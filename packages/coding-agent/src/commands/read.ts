@@ -16,12 +16,12 @@ export default class Read extends Command {
 	};
 
 	static examples = [
-		"omp read src/foo.ts",
-		"omp read src/foo.ts:50-100",
-		"omp read src/foo.ts:raw",
-		"omp read https://example.com",
-		"omp read path/to/archive.zip:dir/file.ts",
-		"omp read path/to/db.sqlite:users:42",
+		"gjc read src/foo.ts",
+		"gjc read src/foo.ts:50-100",
+		"gjc read src/foo.ts:raw",
+		"gjc read https://example.com",
+		"gjc read path/to/archive.zip:dir/file.ts",
+		"gjc read path/to/db.sqlite:users:42",
 	];
 
 	async run(): Promise<void> {

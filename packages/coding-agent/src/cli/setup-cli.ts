@@ -1,7 +1,7 @@
 /**
  * Setup CLI command handler.
  *
- * Handles `omp setup <component>` to install dependencies for optional features.
+ * Handles `gjc setup <component>` to install dependencies for optional features.
  */
 import * as path from "node:path";
 import { $which, APP_NAME, getPythonEnvDir } from "@gajae-code/utils";
@@ -102,7 +102,7 @@ async function checkPythonSetup(): Promise<PythonCheckResult> {
  * Install Python packages using uv (preferred) or pip.
  */
 // Python installation helper removed: the subprocess runner has no Python
-// package dependencies beyond a working interpreter. `omp setup python --check`
+// package dependencies beyond a working interpreter. `gjc setup python --check`
 // remains as a probe; users install optional libs (pandas, matplotlib, ...)
 // directly via pip or the in-process `%pip` magic.
 

@@ -1,7 +1,7 @@
 /**
  * Stats CLI command handlers.
  *
- * Handles `omp stats` subcommand for viewing AI usage statistics.
+ * Handles `gjc stats` subcommand for viewing AI usage statistics.
  */
 
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@gajae-code/utils";
