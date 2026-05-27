@@ -93,7 +93,7 @@ The Ultragoal leader owns `.gjc/ultragoal/goals.json` and `.gjc/ultragoal/ledger
 
 ## Use Ultragoal and Team together
 
-Use ultragoal and team together for a durable Ultragoal story that benefits from parallel execution. Ultragoal remains leader-owned: `.gjc/ultragoal/goals.json` stores the story plan and `.gjc/ultragoal/ledger.jsonl` stores checkpoints. Team is the parallel execution engine and returns task/evidence status to the leader.
+Use ultragoal and team together for a durable Ultragoal story that benefits from one visible tmux worker session. Ultragoal remains leader-owned: `.gjc/ultragoal/goals.json` stores the story plan and `.gjc/ultragoal/ledger.jsonl` stores checkpoints. Team is the single-worker tmux execution engine and returns task/evidence status to the leader.
 
 The leader checkpoints Ultragoal from Team evidence with a fresh `get_goal` snapshot:
 

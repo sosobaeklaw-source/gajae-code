@@ -49,6 +49,8 @@ export interface GjcTeamConfig {
 	worker_command: string;
 	tmux_command: string;
 	tmux_session: string;
+	tmux_session_name: string;
+	tmux_target: string;
 	workspace_mode: "direct" | "worktree";
 	leader: GjcTeamLeader;
 	workers: GjcTeamWorker[];
@@ -62,6 +64,8 @@ export interface GjcTeamSnapshot {
 	phase: GjcTeamPhase;
 	state_dir: string;
 	tmux_session: string;
+	tmux_session_name: string;
+	tmux_target: string;
 	task_total: number;
 	task_counts: Record<GjcTeamTaskStatus, number>;
 	workers: GjcTeamWorker[];
@@ -99,6 +103,13 @@ interface GjcTeamEvent {
 	type: string;
 	message: string;
 	data?: Record<string, unknown>;
+}
+
+interface GjcTmuxLeaderContext {
+	sessionName: string;
+	windowIndex: string;
+	leaderPaneId: string;
+	target: string;
 }
 
 function now(): string {
@@ -167,7 +178,16 @@ async function appendTelemetry(dir: string, event: Omit<GjcTeamEvent, "ts">): Pr
 async function readConfig(dir: string): Promise<GjcTeamConfig> {
 	const config = await readJsonFile<GjcTeamConfig>(path.join(dir, "config.json"));
 	if (!config) throw new Error(`team_config_not_found:${dir}`);
-	return { ...config, tmux_command: config.tmux_command ?? resolveGjcTmuxCommand() };
+	const legacyTmuxSession = config.tmux_session ?? "";
+	const tmuxTarget = config.tmux_target ?? legacyTmuxSession;
+	const tmuxSessionName = config.tmux_session_name ?? legacyTmuxSession.split(":")[0] ?? legacyTmuxSession;
+	return {
+		...config,
+		tmux_command: config.tmux_command ?? resolveGjcTmuxCommand(),
+		tmux_session: tmuxSessionName,
+		tmux_session_name: tmuxSessionName,
+		tmux_target: tmuxTarget,
+	};
 }
 
 async function readPhase(dir: string): Promise<GjcTeamPhase> {
@@ -385,6 +405,25 @@ export function resolveGjcTmuxCommand(env: NodeJS.ProcessEnv = process.env): str
 	return env.GJC_TEAM_TMUX_COMMAND?.trim() || "tmux";
 }
 
+function readCurrentTmuxLeaderContext(tmuxCommand: string, env: NodeJS.ProcessEnv): GjcTmuxLeaderContext {
+	const paneTarget = env.TMUX_PANE?.trim();
+	const args = paneTarget
+		? ["display-message", "-p", "-t", paneTarget, "#S:#I #{pane_id}"]
+		: ["display-message", "-p", "#S:#I #{pane_id}"];
+	const result = Bun.spawnSync([tmuxCommand, ...args], { stdout: "pipe", stderr: "pipe" });
+	if (result.exitCode !== 0) {
+		const stderr = result.stderr.toString().trim();
+		throw new Error(stderr || "team_requires_current_tmux_context");
+	}
+	const stdout = result.stdout.toString().trim();
+	const [sessionAndWindow = "", leaderPaneId = ""] = stdout.split(/\s+/);
+	const [sessionName = "", windowIndex = ""] = sessionAndWindow.split(":");
+	if (!sessionName || !windowIndex || !leaderPaneId.startsWith("%")) {
+		throw new Error(`invalid_tmux_context:${stdout}`);
+	}
+	return { sessionName, windowIndex, leaderPaneId, target: `${sessionName}:${windowIndex}` };
+}
+
 export function resolveGjcWorkerCommand(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
 	const explicit = env.GJC_TEAM_WORKER_COMMAND?.trim();
 	if (explicit) return explicit;
@@ -431,59 +470,26 @@ function buildInitialTasks(task: string): GjcTeamTask[] {
 }
 
 async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: boolean): Promise<GjcTeamWorker[]> {
-	if (dryRun) return config.workers;
-	const [leaderWorker, ...otherWorkers] = config.workers;
-	if (!leaderWorker) return config.workers;
+	if (dryRun)
+		return config.workers.map(worker => ({
+			...worker,
+			pane_id: `%dry-run-${worker.id}`,
+		}));
+	const [worker] = config.workers;
+	if (!worker) return config.workers;
+	const rollbackPaneIds: string[] = [];
 	try {
-		const create = Bun.spawnSync(
-			[
-				config.tmux_command,
-				"new-session",
-				"-d",
-				"-s",
-				config.tmux_session,
-				"-c",
-				leaderWorker.worktree_path ?? config.leader.cwd,
-				buildWorkerCommand(config, leaderWorker),
-			],
-			{
-				stdout: "pipe",
-				stderr: "pipe",
-			},
-		);
-		if (create.exitCode !== 0) {
-			const stderr = create.stderr.toString().trim();
-			throw new Error(stderr || `tmux_start_failed:${config.tmux_session}`);
-		}
-	} catch (error) {
-		if (error instanceof Error) throw error;
-		throw new Error(`tmux_start_failed:${config.tmux_session}`);
-	}
-
-	const workers: GjcTeamWorker[] = [];
-	const leaderPane = Bun.spawnSync(
-		[config.tmux_command, "display-message", "-p", "-t", config.tmux_session, "#{pane_id}"],
-		{
-			stdout: "pipe",
-			stderr: "ignore",
-		},
-	);
-	const leaderPaneId = leaderPane.stdout.toString().trim();
-	if (!leaderPaneId) throw new Error(`tmux_leader_pane_missing:${config.tmux_session}`);
-	workers.push({
-		...leaderWorker,
-		pane_id: leaderPaneId,
-	});
-	for (const worker of otherWorkers) {
 		const split = Bun.spawnSync(
 			[
 				config.tmux_command,
 				"split-window",
+				"-h",
+				"-t",
+				config.leader.pane_id,
+				"-d",
 				"-P",
 				"-F",
 				"#{pane_id}",
-				"-t",
-				config.tmux_session,
 				"-c",
 				worker.worktree_path ?? config.leader.cwd,
 				buildWorkerCommand(config, worker),
@@ -492,29 +498,54 @@ async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: bool
 		);
 		if (split.exitCode !== 0) {
 			const stderr = split.stderr.toString().trim();
-			throw new Error(stderr || `tmux_split_failed:${config.tmux_session}:${worker.id}`);
+			throw new Error(stderr || `tmux_split_failed:${config.tmux_target}:${worker.id}`);
 		}
-		const paneId = split.stdout.toString().trim();
-		if (!paneId) throw new Error(`tmux_split_missing_pane:${config.tmux_session}:${worker.id}`);
-		workers.push({ ...worker, pane_id: paneId });
+		const paneId = split.stdout.toString().trim().split(/\r?\n/)[0]?.trim() ?? "";
+		if (!paneId.startsWith("%")) throw new Error(`tmux_split_missing_pane:${config.tmux_target}:${worker.id}`);
+		rollbackPaneIds.push(paneId);
+		Bun.spawnSync([config.tmux_command, "select-layout", "-t", config.tmux_target, "main-vertical"], {
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		const workers = [{ ...worker, pane_id: paneId }];
+		await appendTelemetry(dir, {
+			type: "tmux_started",
+			message: "Started gjc team worker pane in current tmux window",
+			data: { tmux_target: config.tmux_target, panes: workers.map(candidate => candidate.pane_id).filter(Boolean) },
+		});
+		return workers;
+	} catch (error) {
+		for (const paneId of rollbackPaneIds) {
+			Bun.spawnSync([config.tmux_command, "kill-pane", "-t", paneId], {
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+		}
+		throw error;
 	}
-	Bun.spawnSync([config.tmux_command, "select-layout", "-t", config.tmux_session, "tiled"], {
-		stdout: "ignore",
-		stderr: "ignore",
-	});
-	await appendTelemetry(dir, {
-		type: "tmux_started",
-		message: "Started gjc team tmux session",
-		data: { tmux_session: config.tmux_session, panes: workers.map(worker => worker.pane_id).filter(Boolean) },
-	});
-	return workers;
 }
 
-function killTmuxSession(config: GjcTeamConfig): void {
-	Bun.spawnSync([config.tmux_command, "kill-session", "-t", config.tmux_session], {
-		stdout: "ignore",
+function paneBelongsToTeamTarget(config: GjcTeamConfig, paneId: string): boolean {
+	if (paneId === config.leader.pane_id) return false;
+	const result = Bun.spawnSync([config.tmux_command, "display-message", "-p", "-t", paneId, "#S:#I #{pane_id}"], {
+		stdout: "pipe",
 		stderr: "ignore",
 	});
+	if (result.exitCode !== 0) return false;
+	const stdout = result.stdout.toString().trim();
+	const [target = "", detectedPaneId = ""] = stdout.split(/\s+/);
+	return target === config.tmux_target && detectedPaneId === paneId;
+}
+
+function killWorkerPanes(config: GjcTeamConfig): void {
+	for (const worker of config.workers) {
+		if (!worker.pane_id?.startsWith("%")) continue;
+		if (!paneBelongsToTeamTarget(config, worker.pane_id)) continue;
+		Bun.spawnSync([config.tmux_command, "kill-pane", "-t", worker.pane_id], {
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+	}
 }
 
 async function rollbackCreatedWorktrees(workers: GjcTeamWorker[]): Promise<void> {
@@ -543,12 +574,18 @@ async function removeCleanCreatedWorktrees(workers: GjcTeamWorker[]): Promise<vo
 export async function startGjcTeam(options: GjcTeamStartOptions): Promise<GjcTeamSnapshot> {
 	const cwd = options.cwd ?? process.cwd();
 	const env = options.env ?? process.env;
+	if (options.workerCount !== 1)
+		throw new Error(`unsupported_team_worker_count:${options.workerCount}:gjc_team_supports_one_worker`);
 	const stateRoot = resolveGjcTeamStateRoot(cwd, env);
 	const teamName = sanitizeName(options.teamName ?? makeTeamName(options.task, env));
 	const displayName = sanitizeName(options.teamName ?? options.task).slice(0, 30) || teamName;
 	const dir = teamDir(stateRoot, teamName);
 	const createdAt = now();
 	const worktreeMode = resolveDefaultWorktreeMode(options.worktreeMode);
+	const tmuxCommand = resolveGjcTmuxCommand(env);
+	const tmuxContext = options.dryRun
+		? { sessionName: "dry-run", windowIndex: "0", leaderPaneId: "%dry-run-leader", target: "dry-run:0" }
+		: readCurrentTmuxLeaderContext(tmuxCommand, env);
 	const initialWorkers = buildWorkers(options.workerCount, options.agentType);
 	const workers: GjcTeamWorker[] = [];
 	try {
@@ -568,12 +605,14 @@ export async function startGjcTeam(options: GjcTeamStartOptions): Promise<GjcTea
 		worker_count: options.workerCount,
 		state_root: stateRoot,
 		worker_command: resolveGjcWorkerCommand(cwd, env),
-		tmux_command: resolveGjcTmuxCommand(env),
-		tmux_session: `gjc-${teamName}`,
+		tmux_command: tmuxCommand,
+		tmux_session: tmuxContext.sessionName,
+		tmux_session_name: tmuxContext.sessionName,
+		tmux_target: tmuxContext.target,
 		workspace_mode: worktreeMode.enabled ? "worktree" : "direct",
 		leader: {
 			session_id: env.GJC_SESSION_ID ?? env.CODEX_SESSION_ID ?? "",
-			pane_id: env.TMUX_PANE ?? "",
+			pane_id: tmuxContext.leaderPaneId,
 			cwd,
 		},
 		workers,
@@ -590,6 +629,8 @@ export async function startGjcTeam(options: GjcTeamStartOptions): Promise<GjcTea
 		display_name: config.display_name,
 		requested_name: config.requested_name,
 		tmux_session: config.tmux_session,
+		tmux_session_name: config.tmux_session_name,
+		tmux_target: config.tmux_target,
 		worker_command: config.worker_command,
 		tmux_command: config.tmux_command,
 		leader: config.leader,
@@ -622,7 +663,7 @@ export async function startGjcTeam(options: GjcTeamStartOptions): Promise<GjcTea
 			type: "team_start_failed",
 			message: error instanceof Error ? error.message : String(error),
 		});
-		killTmuxSession(config);
+		killWorkerPanes(config);
 		await rollbackCreatedWorktrees(config.workers);
 		throw error;
 	}
@@ -659,6 +700,8 @@ export async function readGjcTeamSnapshot(
 		phase,
 		state_dir: dir,
 		tmux_session: config.tmux_session,
+		tmux_session_name: config.tmux_session_name,
+		tmux_target: config.tmux_target,
 		task_total: tasks.length,
 		task_counts: taskCounts,
 		workers: config.workers,
@@ -692,7 +735,7 @@ export async function shutdownGjcTeam(
 ): Promise<GjcTeamSnapshot> {
 	const dir = await findTeamDir(teamName, cwd, env);
 	const config = await readConfig(dir);
-	killTmuxSession(config);
+	killWorkerPanes(config);
 	await removeCleanCreatedWorktrees(config.workers);
 	const stopped = {
 		...config,
@@ -751,16 +794,15 @@ export function parseTeamLaunchArgs(argv: string[]): GjcTeamStartOptions {
 	const parsedWorktree = parseWorktreeMode(argv);
 	const positionals = parsedWorktree.remainingArgs.filter(arg => !arg.startsWith("--"));
 	const dryRun = argv.includes("--dry-run");
-	const spec = positionals[0] ?? "3:executor";
+	const spec = positionals[0] ?? "1:executor";
 	const specMatch = spec.match(/^(?:(\d+):)?([a-zA-Z][a-zA-Z0-9_-]*)$/);
-	const workerCount = specMatch?.[1] ? Number.parseInt(specMatch[1], 10) : 3;
+	const workerCount = specMatch?.[1] ? Number.parseInt(specMatch[1], 10) : 1;
 	const agentType = specMatch?.[2] ?? "executor";
 	const task = positionals
 		.slice(specMatch ? 1 : 0)
 		.join(" ")
 		.trim();
 	if (!task) throw new Error("missing_team_task");
-	if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 12)
-		throw new Error(`invalid_worker_count:${workerCount}`);
+	if (workerCount !== 1) throw new Error(`unsupported_team_worker_count:${workerCount}:gjc_team_supports_one_worker`);
 	return { workerCount, agentType, task, dryRun, worktreeMode: resolveDefaultWorktreeMode(parsedWorktree.mode) };
 }

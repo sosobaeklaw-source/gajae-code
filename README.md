@@ -15,7 +15,7 @@ Default public workflow skills are exactly:
 | `deep-interview` | Socratic requirements interview for ambiguous work. | `.gjc/specs/` |
 | `ralplan` | Consensus planning and approval before mutation. | `.gjc/plans/` |
 | `ultragoal` | Durable goal decomposition and checkpoint ledger. | `.gjc/ultragoal/` |
-| `team` | Tmux-backed parallel execution after approval. | `.gjc/state/team/` |
+| `team` | Tmux-backed single-worker execution after approval. | `.gjc/state/team/` |
 
 Default role agents are exactly `executor`, `architect`, `planner`, and `critic`. They are embedded from source prompt files and exposed through task delegation; projects may still provide local `.gjc/agents` overrides when needed.
 
@@ -61,7 +61,7 @@ Start with the lightest path that fits the work:
 2. `deep-interview` for unclear requirements.
 3. `ralplan` for architectural/test planning and approval.
 4. `ultragoal` for durable multi-goal execution tracking.
-5. `team` for approved parallel execution.
+5. `team` for approved single-worker tmux execution.
 
 Planning workflows must stop at `pending approval` until execution is explicitly approved.
 

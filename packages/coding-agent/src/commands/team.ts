@@ -54,7 +54,7 @@ export default class Team extends Command {
 	};
 
 	static examples = [
-		'gjc team 3:executor "Implement the approved plan"',
+		'gjc team executor "Implement the approved plan"',
 		"gjc team status <team-name> --json",
 		'gjc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-01"}\' --json',
 		"gjc team shutdown <team-name>",
