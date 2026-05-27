@@ -3,21 +3,34 @@ import type { AssistantMessage } from "@gajae-code/ai";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
 import { AssistantMessageComponent } from "@gajae-code/coding-agent/modes/components/assistant-message";
 import { BashExecutionComponent } from "@gajae-code/coding-agent/modes/components/bash-execution";
+import { CustomEditor } from "@gajae-code/coding-agent/modes/components/custom-editor";
 import { EvalExecutionComponent } from "@gajae-code/coding-agent/modes/components/eval-execution";
 import { FooterComponent } from "@gajae-code/coding-agent/modes/components/footer";
 import { STATUS_LINE_PRESETS } from "@gajae-code/coding-agent/modes/components/status-line/presets";
 import { UserMessageComponent } from "@gajae-code/coding-agent/modes/components/user-message";
 import { WelcomeComponent } from "@gajae-code/coding-agent/modes/components/welcome";
-import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
+import { getEditorTheme, initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import type { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { type TUI, visibleWidth } from "@gajae-code/tui";
+import { StatusLineComponent } from "../../../src/modes/components/status-line";
 
 function createFooterSession(): AgentSession {
 	return {
 		state: {
+			messages: [],
 			model: { id: "very-long-model-name-for-footer-budget", contextWindow: 200_000 },
 		},
 		sessionManager: {
+			getSessionName: () => "forge-session",
+			getSessionId: () => "session-123456",
+			getUsageStatistics: () => ({
+				input: 1234,
+				output: 567,
+				cacheRead: 89,
+				cacheWrite: 12,
+				premiumRequests: 0,
+				cost: 0.123,
+			}),
 			getEntries: () => [
 				{
 					type: "message",
@@ -36,6 +49,9 @@ function createFooterSession(): AgentSession {
 			],
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 42.5 }),
+		getGoalModeState: () => undefined,
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		isFastModeActive: () => false,
 		modelRegistry: { isUsingOAuth: () => false },
 	} as unknown as AgentSession;
 }
@@ -67,16 +83,19 @@ beforeAll(async () => {
 });
 
 describe("redesigned interactive shell chrome", () => {
-	it("renders distinct GJC-native user and assistant turns", () => {
+	it("renders opencode-style minimal user and gajae turns", () => {
 		const user = Bun.stripANSI(new UserMessageComponent("hello").render(80).join("\n"));
 		const assistant = Bun.stripANSI(
 			new AssistantMessageComponent(createAssistantMessage("hi")).render(80).join("\n"),
 		);
 
-		expect(user).toContain("operator input");
-		expect(assistant).toContain("gajae reply");
-		expect(user).not.toContain("you submitted");
-		expect(assistant).not.toContain("agent response");
+		expect(user).toContain("user");
+		expect(assistant).toContain("gajae");
+		expect(user).not.toContain("operator input");
+		expect(assistant).not.toContain("assistant");
+		expect(assistant).not.toContain("gajae reply");
+		expect(user).not.toContain("▸");
+		expect(assistant).not.toContain("▌");
 	});
 
 	it("keeps the GJC forge launch surface responsive", () => {
@@ -85,11 +104,44 @@ describe("redesigned interactive shell chrome", () => {
 		const rendered = Bun.stripANSI(lines.join("\n"));
 
 		expect(rendered).toContain("Gajae forge");
-		expect(rendered).toContain("╭╮  ╭╮  ╭╮");
+		expect(rendered).toContain("╭────────────────╮        ╭────────╮");
+		expect(rendered).toContain("╰────────────────╯        ╰────────╯");
 		expect(rendered).not.toContain("●");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(54);
 		}
+	});
+
+	it("renders the live composer as a borderless opencode-style prompt", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setBorderVisible(false);
+		editor.setPromptGutter("› ");
+		editor.setPaddingX(1);
+		editor.setText("draft");
+
+		const rendered = Bun.stripANSI(editor.render(40).join("\n"));
+
+		expect(rendered).toContain("› draft");
+		expect(rendered).not.toContain("╭");
+		expect(rendered).not.toContain("╰");
+	});
+
+	it("renders the main status rail outside the borderless composer", () => {
+		const statusLine = new StatusLineComponent(createFooterSession());
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setBorderVisible(false);
+		editor.setPromptGutter("› ");
+		editor.setPaddingX(1);
+		editor.setText("draft");
+
+		const statusRendered = Bun.stripANSI(statusLine.render(140).join("\n"));
+		const editorRendered = Bun.stripANSI(editor.render(140).join("\n"));
+
+		expect(statusRendered).toContain("very-long-model-name-for-footer-budget");
+		expect(statusRendered).toContain("forge-session");
+		expect(editorRendered).toContain("› draft");
+		expect(editorRendered).not.toContain("very-long-model-name-for-footer-budget");
+		expect(editorRendered).not.toContain("╭");
 	});
 
 	it("renders execution rails without breaking output caps", () => {
@@ -130,8 +182,7 @@ describe("redesigned interactive shell chrome", () => {
 		expect(rendered[0]).not.toContain("\x1b]133;A\x07");
 		expect(rendered[1]).not.toContain("\x1b]133;A\x07");
 		expect(rendered[2]).toContain("\x1b]133;A\x07");
-		expect(rendered[rendered.length - 2]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
-		expect(rendered[rendered.length - 1]).not.toContain("\x1b]133;B\x07");
+		expect(rendered[rendered.length - 1]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
 	});
 
 	it("budgets footer prefixes before truncating pulse", () => {

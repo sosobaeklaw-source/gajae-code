@@ -3,6 +3,7 @@ import { type AgentMessage, ThinkingLevel } from "@gajae-code/agent-core";
 import type { AutocompleteProvider, SlashCommand } from "@gajae-code/tui";
 import { $env, sanitizeText } from "@gajae-code/utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import { buildSkillPromptMessage } from "../../extensibility/skills";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { theme } from "../../modes/theme/theme";
@@ -408,7 +409,7 @@ export class InputController {
 	}
 
 	/**
-	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
+	 * Dispatch a skill slash invocation (`/skill:<name>`) through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns true if the text was a
 	 * recognised skill command and was dispatched. A failure to load the skill
 	 * file is surfaced via `showError` but still returns true — the editor was
@@ -421,29 +422,17 @@ export class InputController {
 	 * ignores it.
 	 */
 	async #invokeSkillCommand(text: string, streamingBehavior: "steer" | "followUp"): Promise<boolean> {
-		if (!text.startsWith("/skill:")) return false;
+		if (!text.startsWith("/")) return false;
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-		const skillPath = this.ctx.skillCommands?.get(commandName);
-		if (!skillPath) return false;
+		const skill = this.ctx.skillCommands?.get(commandName);
+		if (!skill) return false;
 		this.ctx.editor.addToHistory(text);
 		this.ctx.editor.setText("");
 		try {
-			const content = await Bun.file(skillPath).text();
-			const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-			const metaLines = [`Skill: ${skillPath}`];
-			if (args) {
-				metaLines.push(`User: ${args}`);
-			}
-			const message = `${body}\n\n---\n\n${metaLines.join("\n")}`;
-			const skillName = commandName.slice("skill:".length);
-			const details: SkillPromptDetails = {
-				name: skillName || commandName,
-				path: skillPath,
-				args: args || undefined,
-				lineCount: body ? body.split("\n").length : 0,
-			};
+			const built = await buildSkillPromptMessage(skill, args);
+			const details: SkillPromptDetails = built.details;
 			// When the agent is streaming, register the compact slash-form text as
 			// the pending-display twin BEFORE dispatching the CustomMessage. The
 			// returned tag is embedded in details so AgentSession.#handleAgentEvent
@@ -456,7 +445,7 @@ export class InputController {
 			await this.ctx.session.promptCustomMessage(
 				{
 					customType: SKILL_PROMPT_MESSAGE_TYPE,
-					content: message,
+					content: built.message,
 					display: true,
 					details,
 					attribution: "user",

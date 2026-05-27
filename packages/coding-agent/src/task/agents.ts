@@ -5,6 +5,7 @@
  */
 import { Effort } from "@gajae-code/ai";
 import { parseFrontmatter, prompt } from "@gajae-code/utils";
+import { getDefaultGjcAgentDefinitions } from "../defaults/gjc-defaults";
 import { parseAgentFields } from "../discovery/helpers";
 import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
 // Embed agent markdown files at build time
@@ -118,9 +119,13 @@ export function loadBundledAgents(): AgentDefinition[] {
 	if (bundledAgentsCache !== null) {
 		return bundledAgentsCache;
 	}
-	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def =>
+	const defaultAgents = getDefaultGjcAgentDefinitions().map(definition =>
+		parseAgent(`embedded:gjc/${definition.relativePath}`, definition.content, "bundled"),
+	);
+	const utilityAgents = EMBEDDED_AGENT_DEFS.map(def =>
 		parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"),
 	);
+	bundledAgentsCache = [...defaultAgents, ...utilityAgents];
 	return bundledAgentsCache;
 }
 

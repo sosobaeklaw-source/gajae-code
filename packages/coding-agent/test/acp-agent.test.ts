@@ -1059,11 +1059,7 @@ describe("ACP agent", () => {
 				source: "test",
 			},
 		];
-		await harness.agent.prompt({
-			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000004",
-			prompt: [{ type: "text", text: "/reload-plugins" }],
-		} as PromptRequest);
+		await waitForBootstrapGuard();
 
 		const commandUpdates = harness.updates.filter(
 			update =>
@@ -1077,6 +1073,7 @@ describe("ACP agent", () => {
 		expect(names).toContain("fast");
 		expect(names).toContain("force");
 		expect(names).toContain("skill:sample");
+		expect(names).not.toContain("sample");
 		expect(names).not.toContain("settings");
 		expect(names).not.toContain("copy");
 		expect(names).not.toContain("plan");
@@ -1126,6 +1123,23 @@ describe("ACP agent", () => {
 		expect(session.customMessages[0]!.content).toContain("# Sample\nDo work.");
 		expect(session.customMessages[0]!.content).toContain(`Skill: ${skillPath}`);
 		expect(session.customMessages[0]!.content).toContain("User: extra context");
+
+		session.customMessages = [];
+		session.skills.push({
+			name: "fast",
+			description: "Colliding skill",
+			filePath: skillPath,
+			baseDir: skillDir,
+			source: "test",
+		});
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000002",
+			prompt: [{ type: "text", text: "/fast" }],
+		} as PromptRequest);
+
+		expect(session.customMessages).toEqual([]);
+		expect(session.fastMode).toBe(true);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

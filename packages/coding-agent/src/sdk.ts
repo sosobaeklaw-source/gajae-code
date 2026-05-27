@@ -46,6 +46,7 @@ import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
+import { getEmbeddedDefaultGjcSkills } from "./defaults/gjc-defaults";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { TtsrManager } from "./export/ttsr";
@@ -64,7 +65,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import { ExtensionRuntime } from "./extensibility/extensions/loader";
-import { type Skill, type SkillWarning, setActiveSkills } from "./extensibility/skills";
+import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "./extensibility/skills";
 import type { FileSlashCommand } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
@@ -253,7 +254,7 @@ export interface CreateAgentSessionOptions {
 	/** Shared event bus for tool/extension communication. Default: creates new bus. */
 	eventBus?: EventBus;
 
-	/** Skills. Default: discovered from multiple locations */
+	/** Skills. Default: bundled GJC defaults, plus filesystem skills when enabled */
 	skills?: Skill[];
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
@@ -762,6 +763,17 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
  * });
  * ```
  */
+
+function withEmbeddedDefaultGjcSkills(skills: Skill[]): Skill[] {
+	const byName = new Map(skills.map(skill => [skill.name, skill]));
+	for (const defaultSkill of getEmbeddedDefaultGjcSkills()) {
+		if (!byName.has(defaultSkill.name)) {
+			byName.set(defaultSkill.name, defaultSkill);
+		}
+	}
+	return [...byName.values()];
+}
+
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getDefaultAgentDir();
@@ -967,10 +979,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
 	if (options.skills !== undefined) {
-		skills = options.skills;
+		// The four public GJC workflow skills are a product invariant, not
+		// ordinary filesystem-discovered skills. Keep them available even for
+		// explicit SDK skill lists so startup and command routing survive
+		// accidental `.gjc` deletion or overzealous caller filtering.
+		skills = withEmbeddedDefaultGjcSkills(options.skills);
 		skillWarnings = [];
+	} else if (settings.get("skills.enabled")) {
+		const skillsResult = await logger.time("loadSkills", loadSkills, {
+			...settings.getGroup("skills"),
+			cwd,
+			disabledExtensions: settings.get("disabledExtensions"),
+		});
+		skills = withEmbeddedDefaultGjcSkills(skillsResult.skills);
+		skillWarnings = skillsResult.warnings;
 	} else {
-		skills = [];
+		// GJC's four public workflow skills are bundled into the binary so the
+		// default workflow surface survives accidental .gjc deletion. Arbitrary
+		// filesystem skill discovery remains gated by skills.enabled above.
+		skills = getEmbeddedDefaultGjcSkills();
 		skillWarnings = [];
 	}
 

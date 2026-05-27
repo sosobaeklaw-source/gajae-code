@@ -7,6 +7,8 @@ import {
 	getDefaultGjcDefinitions,
 	installDefaultGjcDefinitions,
 } from "@gajae-code/coding-agent/defaults/gjc-defaults";
+import { loadSkills } from "@gajae-code/coding-agent/extensibility/skills";
+import { discoverAgents } from "@gajae-code/coding-agent/task/discovery";
 
 const tempRoots: string[] = [];
 
@@ -37,6 +39,43 @@ describe("default GJC definitions", () => {
 		expect(agents).toEqual(expected);
 		expect(definitions).toHaveLength(8);
 		expect(definitions.every(definition => definition.content.includes(definition.name))).toBe(true);
+	});
+
+	it("keeps the four default agents bundled when project .gjc is absent", async () => {
+		const repoRoot = await makeTempRoot();
+		const agents = await discoverAgents(repoRoot, repoRoot);
+		const expected = [...DEFAULT_GJC_DEFINITION_NAMES].sort();
+		const bundledDefaults = agents.agents
+			.filter(agent => agent.source === "bundled" && expected.includes(agent.name as (typeof expected)[number]))
+			.map(agent => agent.name)
+			.sort();
+
+		expect(bundledDefaults).toEqual(expected);
+		expect(agents.projectAgentsDir).toBeNull();
+	});
+
+	it("makes installed project definitions discoverable by GJC skill and agent loaders", async () => {
+		const repoRoot = await makeTempRoot();
+		const projectGjcRoot = path.join(repoRoot, ".gjc");
+		await installDefaultGjcDefinitions({ targetRoot: projectGjcRoot });
+
+		const skills = await loadSkills({
+			cwd: repoRoot,
+			enabled: true,
+			enablePiProject: true,
+			enablePiUser: false,
+		});
+		const agents = await discoverAgents(repoRoot, repoRoot);
+		const expected = [...DEFAULT_GJC_DEFINITION_NAMES].sort();
+
+		expect(skills.skills.map(skill => skill.name).sort()).toEqual(expected);
+		expect(
+			agents.agents
+				.filter(agent => agent.source === "project")
+				.map(agent => agent.name)
+				.sort(),
+		).toEqual(expected);
+		expect(agents.projectAgentsDir).toBe(path.join(projectGjcRoot, "agents"));
 	});
 
 	it("installs bundled definitions without overwriting local edits unless forced", async () => {

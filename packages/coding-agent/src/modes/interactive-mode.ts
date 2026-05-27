@@ -37,6 +37,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import { resolveSkillSlashCommands, type Skill } from "../extensibility/skills";
 import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
@@ -115,6 +116,12 @@ const HINT_SHIMMER_PALETTE: ShimmerPalette = {
 	mid: "muted",
 	high: "borderAccent",
 };
+
+function configureDefaultComposerChrome(editor: CustomEditor): void {
+	editor.setBorderVisible(false);
+	editor.setPromptGutter(`${theme.fg("accent", "›")} `);
+	editor.setPaddingX(1);
+}
 
 interface WorkingMessageAccent {
 	main: string;
@@ -277,10 +284,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastStatusSpacer: Spacer | undefined = undefined;
 	lastStatusText: Text | undefined = undefined;
 	fileSlashCommands: Set<string> = new Set();
-	skillCommands: Map<string, string> = new Map();
+	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 
-	#pendingSlashCommands: SlashCommand[] = [];
+	#baseSlashCommands: SlashCommand[] = [];
+	#baseReservedSlashCommandNames: Set<string> = new Set();
 	#cleanupUnsubscribe?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
@@ -353,6 +361,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.todoContainer = new Container();
 		this.btwContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
+		configureDefaultComposerChrome(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.editor.onAutocompleteCancel = () => {
@@ -398,19 +407,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			description: `${loaded.command.description} (${loaded.source})`,
 		}));
 
-		// Build skill commands from session.skills (if enabled)
-		const skillCommandList: SlashCommand[] = [];
-		if (settings.get("skills.enableSkillCommands")) {
-			for (const skill of this.session.skills) {
-				if (skill.hide === true) continue;
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
-				skillCommandList.push({ name: commandName, description: skill.description });
-			}
-		}
-
-		// Store pending commands for init() where file commands are loaded async
-		this.#pendingSlashCommands = [...BUILTIN_SLASH_COMMANDS, ...hookCommands, ...customCommands, ...skillCommandList];
+		this.#baseSlashCommands = [...BUILTIN_SLASH_COMMANDS, ...hookCommands, ...customCommands];
+		this.#baseReservedSlashCommandNames = new Set(this.#baseSlashCommands.map(command => command.name));
+		this.#rebuildSkillSlashCommands();
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
@@ -498,7 +497,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.todoContainer);
 		this.ui.addChild(this.btwContainer);
-		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
+		this.ui.addChild(this.statusLine); // Main status rail + hook statuses; composer stays borderless.
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
@@ -560,6 +559,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Set up theme file watcher
 		onThemeChange(() => {
 			clearRenderCache();
+			configureDefaultComposerChrome(this.editor);
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
@@ -586,17 +586,36 @@ export class InteractiveMode implements InteractiveModeContext {
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
-		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
+		const fileCommandNames = new Set(fileCommands.map(cmd => cmd.name));
+		this.fileSlashCommands = fileCommandNames;
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
 			name: cmd.name,
 			description: cmd.description,
 		}));
+		const skillCommands = this.#rebuildSkillSlashCommands(fileCommandNames);
+		const slashCommands = [...this.#baseSlashCommands, ...skillCommands];
 		const autocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands],
+			[...slashCommands, ...fileSlashCommands],
 			basePath,
 		);
 		this.editor.setAutocompleteProvider(autocompleteProvider);
 		this.session.setSlashCommands(fileCommands);
+	}
+
+	#rebuildSkillSlashCommands(fileCommandNames: ReadonlySet<string> = new Set()): SlashCommand[] {
+		this.skillCommands.clear();
+		if (!settings.get("skills.enableSkillCommands")) {
+			return [];
+		}
+		const reservedDirectCommandNames = new Set([
+			...this.#baseReservedSlashCommandNames,
+			...Array.from(fileCommandNames),
+		]);
+		const resolvedCommands = resolveSkillSlashCommands(this.session.skills, reservedDirectCommandNames);
+		for (const command of resolvedCommands) {
+			this.skillCommands.set(command.name, command.skill);
+		}
+		return resolvedCommands.map(command => ({ name: command.name, description: command.description }));
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
@@ -921,9 +940,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	updateEditorTopBorder(): void {
-		const availableWidth = this.editor.getTopBorderAvailableWidth(this.ui.terminal.columns);
-		const topBorder = this.statusLine.getTopBorder(availableWidth);
-		this.editor.setTopBorder(topBorder);
+		// The opencode-style composer is intentionally borderless. Keep status-line
+		// rendering out of the input area so the prompt remains a simple gutter + body.
+		this.editor.setTopBorder(undefined);
 	}
 
 	rebuildChatFromMessages(): void {
@@ -2063,6 +2082,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
 
+		configureDefaultComposerChrome(nextEditor);
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.onAutocompleteCancel = () => {

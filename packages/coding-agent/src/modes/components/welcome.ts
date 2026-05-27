@@ -78,13 +78,15 @@ export class WelcomeComponent implements Component {
 			return [];
 		}
 		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
-		const preferredLeftCol = 26;
-		const minLeftCol = 16; // claw mark plus GJC identity labels
+		const preferredLeftCol = 36;
+		const minLeftCol = 18; // claw mark plus GJC identity labels
 		const minRightCol = 20;
 		const modelPill = this.#pill(theme.icon.model || "model", this.modelName, "statusLineModel");
 		const providerPill = this.#pill(theme.icon.package || "provider", this.providerName, "statusLinePath");
+		const logoMinWidth = Math.max(...RED_CLAW_LOGO.map(line => visibleWidth(line)));
 		const leftMinContentWidth = Math.max(
 			minLeftCol,
+			logoMinWidth,
 			visibleWidth("Gajae forge"),
 			visibleWidth("shape · act · prove"),
 			visibleWidth(modelPill),
@@ -276,7 +278,14 @@ export class WelcomeComponent implements Component {
 }
 
 // biome-ignore format: preserve ASCII art layout
-const RED_CLAW_LOGO = ["  ╭╮  ╭╮  ╭╮ ", " ╭╯│ ╭╯│ ╭╯│ ", "╭╯ ╰─╯ ╰─╯ ╰╮", "╰╮  ╭───╮  ╭╯", " ╰──╯   ╰──╯ "];
+const RED_CLAW_LOGO = [
+	"╭────────────────╮        ╭────────╮",
+	"╰──────╮      ╭──╯     ╭──╯  ╭─────╯",
+	"       ╰──────╯    ╭───╯  ╭──╯      ",
+	"       ╭──────╮    ╰───╮  ╰──╮      ",
+	"╭──────╯      ╰──╮     ╰──╮  ╰─────╮",
+	"╰────────────────╯        ╰────────╯",
+];
 
 /** Multi-stop palette for the red-claw diagonal gradient. */
 const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [

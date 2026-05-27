@@ -642,8 +642,6 @@ async function buildSessionOptions(
 		options.enableLsp = false;
 	}
 
-	options.skills = [];
-
 	// Rules
 	if (parsed.noRules) {
 		options.rules = [];

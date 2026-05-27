@@ -17,16 +17,9 @@ export class UserMessageComponent extends Container {
 			? (value: string) => theme.fg("dim", value)
 			: (value: string) => theme.fg("userMessageText", value);
 		this.addChild(new Spacer(1));
-		const label = synthetic ? "replay" : "operator";
-		this.addChild(
-			new Text(
-				`${theme.fg("borderAccent", "▸")} ${theme.bold(theme.fg("accent", label))} ${theme.fg("dim", "input")}`,
-				1,
-				0,
-			),
-		);
+		const label = synthetic ? "replay" : "user";
+		this.addChild(new Text(theme.bold(theme.fg("accent", label)), 1, 0));
 		this.addChild(new PromptZoneMarkdown(text, bgColor, color));
-		this.addChild(new Text(theme.fg("borderAccent", "▔"), 1, 0));
 	}
 }
 

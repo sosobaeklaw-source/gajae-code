@@ -16,12 +16,7 @@ export class AssistantMessageComponent extends Container {
 	#usageInfo?: Usage;
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#kittyConversionsInFlight = new Set<string>();
-	#responseHeader = new Text(
-		`${theme.fg("border", "▌")} ${theme.bold(theme.fg("statusLineModel", "gajae"))} ${theme.fg("dim", "reply")}`,
-		1,
-		0,
-	);
-	#responseFooter = new Text(theme.fg("border", "▔"), 1, 0);
+	#responseHeader = new Text(theme.bold(theme.fg("statusLineModel", "gajae")), 1, 0);
 
 	constructor(
 		message?: AssistantMessage,
@@ -188,9 +183,6 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		this.#renderToolImages();
-		if (hasVisibleContent) {
-			this.#contentContainer.addChild(this.#responseFooter);
-		}
 		// Check if aborted - show after partial content
 		// But only if there are no tool calls (tool execution components will show the error)
 		const hasToolCalls = message.content.some(c => c.type === "toolCall");

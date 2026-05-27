@@ -2427,7 +2427,7 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.enableSkillCommands": {
 		type: "boolean",
-		default: false,
+		default: true,
 	},
 
 	"skills.enableCodexUser": { type: "boolean", default: false },

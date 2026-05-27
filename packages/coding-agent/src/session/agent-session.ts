@@ -4646,7 +4646,7 @@ export class AgentSession {
 		return this.#skillsSettings;
 	}
 
-	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
+	/** Skills loaded by SDK (always includes bundled GJC workflow defaults unless explicitly overridden by SDK callers) */
 	get skills(): readonly Skill[] {
 		return this.#skills;
 	}

@@ -138,5 +138,5 @@ The gate auto-passes when it detects **any** concrete signal. You do not need al
 |-------|----------|
 | Gate fires on a well-specified prgjct | Add a file reference, function name, or issue number to anchor the request |
 | Want to bypass the gate | Prefix with `force:` or `!` (e.g., `force: team fix it`) |
-| Gate does not fire on a vague prgjct | The gate only catches prgjcts with <=15 effective words and no concrete anchors; add more detail or use `/ralplan` explicitly |
+| Gate does not fire on a vague prgjct | The gate only catches prgjcts with <=15 effective words and no concrete anchors; add more detail or use `/skill:ralplan` explicitly |
 | Redirected to ralplan but want execution | Use the structured approval option or explicitly say which execution skill should proceed; `just do it` / `skip planning` alone only ends planning with a `pending approval` artifact |

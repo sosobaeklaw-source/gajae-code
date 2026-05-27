@@ -23,6 +23,8 @@ import { Agent } from "@gajae-code/agent-core";
 import { getBundledModel } from "@gajae-code/ai/models";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
+import { getEmbeddedDefaultGjcSkills } from "@gajae-code/coding-agent/defaults/gjc-defaults";
+import { resolveSkillSlashCommands, type Skill } from "@gajae-code/coding-agent/extensibility/skills";
 import { EventController } from "@gajae-code/coding-agent/modes/controllers/event-controller";
 import { InputController } from "@gajae-code/coding-agent/modes/controllers/input-controller";
 import { getThemeByName, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
@@ -56,7 +58,7 @@ type StubEditor = {
 	onSubmit?: (text: string) => Promise<void>;
 };
 
-function createStubInputControllerContext(opts: { skillCommands: Map<string, string>; isStreaming: boolean }) {
+function createStubInputControllerContext(opts: { skillCommands: Map<string, Skill>; isStreaming: boolean }) {
 	let editorText = "";
 	const editor: StubEditor = {
 		setText(text) {
@@ -70,7 +72,9 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 	const enqueueCustomMessageDisplay = vi.fn((_text: string, _mode: "steer" | "followUp") => "sk-test-0");
 	// Annotate parameters so `mock.calls[N]` is typed as a tuple (not `[]`) and
 	// `message` carries required skill prompt details for assertion below.
-	const promptCustomMessage = vi.fn(async (_message: { details: SkillPromptDetails }, _options?: unknown) => {});
+	const promptCustomMessage = vi.fn(
+		async (_message: { content: string; details: SkillPromptDetails }, _options?: unknown) => {},
+	);
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
@@ -106,12 +110,26 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 
 describe("InputController #invokeSkillCommand (E1-E3)", () => {
 	let tempDir: TempDir;
-	let skillCommands: Map<string, string>;
+	let skillCommands: Map<string, Skill>;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-skill-queue-stub-");
 		const skillPath = writeSkillFile(tempDir.path(), "test-skill", "Do the thing.");
-		skillCommands = new Map<string, string>([["skill:test-skill", skillPath]]);
+		skillCommands = new Map<string, Skill>([
+			[
+				"skill:test-skill",
+				{
+					name: "test-skill",
+					description: "Test skill",
+					filePath: skillPath,
+					baseDir: tempDir.path(),
+					source: "test",
+				},
+			],
+		]);
+		const skill = skillCommands.get("skill:test-skill");
+		if (!skill) throw new Error("expected test skill");
+		skillCommands.set("test-skill", skill);
 	});
 
 	afterEach(() => {
@@ -166,6 +184,29 @@ describe("InputController #invokeSkillCommand (E1-E3)", () => {
 		expect(messageArg.details.__pendingDisplayTag).toBe("sk-test-0");
 	});
 
+	it("E3b: embedded default skill command does not require .gjc on disk", async () => {
+		const embedded = getEmbeddedDefaultGjcSkills().find(skill => skill.name === "deep-interview");
+		if (!embedded) throw new Error("expected embedded deep-interview skill");
+		const { ctx, editor, promptCustomMessage } = createStubInputControllerContext({
+			skillCommands: new Map<string, Skill>([["skill:deep-interview", embedded]]),
+			isStreaming: false,
+		});
+
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:deep-interview clarify this");
+		await editor.onSubmit?.("/skill:deep-interview clarify this");
+
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		const firstCall = promptCustomMessage.mock.calls[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) throw new Error("expected promptCustomMessage to be called");
+		const messageArg = firstCall[0];
+		expect(messageArg.content).toContain("Deep Interview");
+		expect(messageArg.details.path).toBe("embedded:gjc/skills/deep-interview/SKILL.md");
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
+
 	it("E3: not streaming -> enqueueCustomMessageDisplay NOT called and tag absent", async () => {
 		const { ctx, editor, enqueueCustomMessageDisplay, promptCustomMessage } = createStubInputControllerContext({
 			skillCommands,
@@ -185,6 +226,24 @@ describe("InputController #invokeSkillCommand (E1-E3)", () => {
 		}
 		const messageArg = firstCall[0];
 		expect(messageArg.details.__pendingDisplayTag).toBeUndefined();
+	});
+});
+
+describe("skill slash command resolution", () => {
+	it("enables namespaced skill commands by default", () => {
+		expect(Settings.isolated().get("skills.enableSkillCommands")).toBe(true);
+	});
+
+	it("exposes only namespaced skill commands", () => {
+		const deepInterview = getEmbeddedDefaultGjcSkills().find(skill => skill.name === "deep-interview");
+		if (!deepInterview) throw new Error("expected embedded deep-interview skill");
+
+		const withFileCollision = resolveSkillSlashCommands([deepInterview], new Set(["deep-interview"]));
+		expect(withFileCollision.map(command => command.name)).toEqual(["skill:deep-interview"]);
+
+		const afterCollisionRemoved = resolveSkillSlashCommands([deepInterview], new Set());
+		expect(afterCollisionRemoved.map(command => command.name)).toEqual(["skill:deep-interview"]);
+		expect(afterCollisionRemoved.every(command => command.skill === deepInterview)).toBe(true);
 	});
 });
 

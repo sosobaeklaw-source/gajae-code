@@ -50,7 +50,12 @@ import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { buildSkillPromptMessage, getSkillSlashCommandName } from "../../extensibility/skills";
+import {
+	buildSkillPromptMessage,
+	getSkillSlashCommandNames,
+	isNamespacedSkillSlashCommandName,
+	isSkillSlashCommandName,
+} from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
@@ -641,8 +646,10 @@ export class AcpAgent implements Agent {
 	}
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult) {
+		// Namespaced skill commands cannot collide with ACP builtins; handle
+		// them before builtin dispatch. Bare `/name` aliases are intentionally
+		// not skill commands.
+		if (text.startsWith("/skill:") && (await this.#tryRunSkillCommand(record, text))) {
 			return;
 		}
 
@@ -686,11 +693,19 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		if (await this.#tryRunSkillCommand(record, text, { directAliasMayCollide: false })) {
+			return;
+		}
+
 		await record.session.prompt(text, { images });
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
-		if (!text.startsWith("/skill:")) {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		options: { directAliasMayCollide?: boolean } = {},
+	): Promise<boolean> {
+		if (!text.startsWith("/")) {
 			return false;
 		}
 		if (!record.session.skillsSettings?.enableSkillCommands) {
@@ -699,8 +714,14 @@ export class AcpAgent implements Agent {
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-		const skillName = commandName.slice("skill:".length);
-		const skill = record.session.skills.find(candidate => candidate.name === skillName);
+		if (
+			!isNamespacedSkillSlashCommandName(commandName) &&
+			options.directAliasMayCollide !== true &&
+			(await this.#directSkillAliasCollides(record, commandName))
+		) {
+			return false;
+		}
+		const skill = record.session.skills.find(candidate => isSkillSlashCommandName(commandName, candidate));
 		if (!skill || skill.hide === true) {
 			return false;
 		}
@@ -713,6 +734,14 @@ export class AcpAgent implements Agent {
 			attribution: "user",
 		});
 		return true;
+	}
+
+	async #directSkillAliasCollides(record: ManagedSessionRecord, commandName: string): Promise<boolean> {
+		if (record.session.customCommands.some(command => command.command.name === commandName)) {
+			return true;
+		}
+		const fileCommands = await loadSlashCommands({ cwd: record.session.sessionManager.getCwd() });
+		return fileCommands.some(command => command.name === commandName);
 	}
 
 	async cancel(params: { sessionId: string }): Promise<void> {
@@ -1396,23 +1425,10 @@ export class AcpAgent implements Agent {
 			commands.push(command);
 		};
 
-		// Advertise in the order dispatch resolves them: ACP builtins first
-		// (so core commands like `/model`, `/mcp`, `/todo` cannot be shadowed),
-		// then skills, then custom/user commands, then file-based slash
-		// commands. `appendCommand` dedupes by name so earlier entries win.
+		// Advertise builtins first, then custom/user commands, then file-based
+		// slash commands, then namespaced `/skill:<name>` skills.
 		for (const command of ACP_BUILTIN_SLASH_COMMANDS) {
 			appendCommand(command);
-		}
-
-		if (session.skillsSettings?.enableSkillCommands) {
-			for (const skill of session.skills) {
-				if (skill.hide === true) continue;
-				appendCommand({
-					name: getSkillSlashCommandName(skill),
-					description: skill.description || `Run ${skill.name} skill`,
-					input: { hint: "arguments" },
-				});
-			}
 		}
 
 		for (const command of session.customCommands) {
@@ -1428,6 +1444,19 @@ export class AcpAgent implements Agent {
 				name: command.name,
 				description: command.description,
 			});
+		}
+
+		if (session.skillsSettings?.enableSkillCommands) {
+			for (const skill of session.skills) {
+				if (skill.hide === true) continue;
+				for (const name of getSkillSlashCommandNames(skill)) {
+					appendCommand({
+						name,
+						description: skill.description || `Run ${skill.name} skill`,
+						input: { hint: "arguments" },
+					});
+				}
+			}
 		}
 
 		return commands;

@@ -779,16 +779,21 @@ export class StatusLineComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		// Only render hook statuses - main status is in editor's top border
-		const showHooks = this.#settings.showHookStatus ?? true;
-		if (!showHooks || this.#hookStatuses.size === 0) {
-			return [];
+		const lines: string[] = [];
+		const statusLine = this.#buildStatusLine(width);
+		if (statusLine) {
+			lines.push(truncateToWidth(statusLine, width));
 		}
 
-		const sortedStatuses = Array.from(this.#hookStatuses.entries())
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([, text]) => sanitizeStatusText(text));
-		const hookLine = sortedStatuses.join(" ");
-		return [truncateToWidth(hookLine, width)];
+		const showHooks = this.#settings.showHookStatus ?? true;
+		if (showHooks && this.#hookStatuses.size > 0) {
+			const sortedStatuses = Array.from(this.#hookStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => sanitizeStatusText(text));
+			const hookLine = sortedStatuses.join(" ");
+			lines.push(truncateToWidth(hookLine, width));
+		}
+
+		return lines;
 	}
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
+import { DEFAULT_GJC_DEFINITION_NAMES } from "@gajae-code/coding-agent/defaults/gjc-defaults";
 import type { Skill } from "@gajae-code/coding-agent/sdk";
 import { createAgentSession } from "@gajae-code/coding-agent/sdk";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
@@ -69,6 +70,20 @@ Loaded via symbolic link.
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
+	it("loads embedded default GJC workflow skills even when .gjc is absent and arbitrary skill discovery is disabled", async () => {
+		fs.rmSync(path.join(tempDir, ".gjc"), { recursive: true, force: true });
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "skills.enabled": false }),
+		});
+		const expected = [...DEFAULT_GJC_DEFINITION_NAMES].sort();
+
+		expect(session.skills.map(skill => skill.name).sort()).toEqual(expected);
+		expect(session.skills.every(skill => skill.filePath.startsWith("embedded:gjc/skills/"))).toBe(true);
+	});
+
 	it("should discover skills by default and expose them on session.skills", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -107,22 +122,20 @@ Loaded via symbolic link.
 
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
 	});
-	it("should have empty skills when options.skills is empty array (--no-skills)", async () => {
+	it("keeps bundled GJC workflow skills even when options.skills is empty", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
-			skills: [], // Explicitly empty - like --no-skills
+			skills: [],
 			settings: createIsolatedSkillsSettings(),
 		});
 
-		// session.skills should be empty
-		expect(session.skills).toEqual([]);
-		// No warnings since we didn't discover
+		expect(session.skills.map(skill => skill.name).sort()).toEqual([...DEFAULT_GJC_DEFINITION_NAMES].sort());
 		expect(session.skillWarnings).toEqual([]);
 	});
 
-	it("should use provided skills when options.skills is explicitly set", async () => {
+	it("should use provided skills plus bundled GJC workflow skills when options.skills is explicitly set", async () => {
 		const customSkill: Skill = {
 			name: "custom-skill",
 			description: "A custom skill",
@@ -139,9 +152,10 @@ Loaded via symbolic link.
 			settings: createIsolatedSkillsSettings(),
 		});
 
-		// session.skills should contain only the provided skill
-		expect(session.skills).toEqual([customSkill]);
-		// No warnings since we didn't discover
+		expect(session.skills).toContainEqual(customSkill);
+		for (const name of DEFAULT_GJC_DEFINITION_NAMES) {
+			expect(session.skills.some(skill => skill.name === name)).toBe(true);
+		}
 		expect(session.skillWarnings).toEqual([]);
 	});
 });
