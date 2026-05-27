@@ -23,7 +23,7 @@ I created an earlier OpenAI code harness and `an earlier Anthropic-code harness`
 Gajae-Code is published through the normal npm registry. Install it with Bun for the recommended runtime workflow:
 
 ```sh
-bun install gajae-code
+bun install -g @gajae-code/coding-agent
 ```
 
 For repository development, use the source checkout commands in [Development](#development).
