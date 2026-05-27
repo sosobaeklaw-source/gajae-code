@@ -2,8 +2,8 @@ import { Args, Command, Flags } from "@gajae-code/utils/cli";
 import {
 	executeGjcTeamApiOperation,
 	listGjcTeams,
+	monitorGjcTeam,
 	parseTeamLaunchArgs,
-	readGjcTeamSnapshot,
 	shutdownGjcTeam,
 	startGjcTeam,
 } from "../gjc-runtime/team-runtime";
@@ -68,7 +68,7 @@ export default class Team extends Command {
 		if (action === "status" || action === "resume") {
 			const teamName = rest.find(arg => !arg.startsWith("--"));
 			if (!teamName) throw new Error("missing_team_name");
-			const snapshot = await readGjcTeamSnapshot(teamName);
+			const snapshot = await monitorGjcTeam(teamName);
 			if (json) {
 				writeJson(snapshot);
 				return;

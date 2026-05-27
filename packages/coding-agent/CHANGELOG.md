@@ -5,6 +5,8 @@
 ### Changed
 
 - Restored `gjc team` multi-worker GJC-team parity orchestration with current-window worker panes, GJC-scoped state/API semantics, and `N:agent-type` launches.
+- Ported GJC team worker-worktree integration parity so `status`/`resume` auto-checkpoint dirty workers, merge or cherry-pick worker commits, cross-rebase idle workers, and record conflicts under `.gjc` integration artifacts.
+- Restored `gjc team` multi-worker OMX-parity orchestration with current-window worker panes, GJC-scoped state/API semantics, and `N:agent-type` launches.
 
 ### Added
 

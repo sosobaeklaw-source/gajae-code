@@ -119,7 +119,7 @@ For a package-by-package map, see [`docs/codebase-overview.md`](docs/codebase-ov
 
 ## Inspirations and lineage
 
-Gajae-Code builds on lessons from a small family of agent harnesses while keeping the public GJC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
+Gajae-Code's default dark TUI identity is the GJC red-claw theme. It builds on lessons from a small family of agent harnesses while keeping the public GJC surface intentionally focused. Historical attribution is kept in [`NOTICE.md`](NOTICE.md).
 
 ## License
 

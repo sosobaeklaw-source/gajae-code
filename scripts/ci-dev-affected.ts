@@ -207,6 +207,7 @@ function planTasks(paths: readonly string[], packages: readonly WorkspacePackage
 		add(tasks, "install-methods", "Install method smoke tests", ["bun", "run", "ci:test:install-methods"]);
 	}
 	if (paths.some(isCodingAgentRuntimePath) || fullWorkspace) {
+		add(tasks, "native-build", "Build native addon for CLI smoke test", ["bun", "run", "build:native"]);
 		add(tasks, "cli-smoke", "GJC CLI smoke test", ["bun", "run", "ci:test:smoke"]);
 	}
 	if (paths.some(isWorkflowOrScriptPath)) {

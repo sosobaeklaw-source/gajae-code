@@ -5,7 +5,9 @@ import * as path from "node:path";
 import {
 	claimGjcTeamTask,
 	executeGjcTeamApiOperation,
+	type GjcTeamConfig,
 	listGjcTeams,
+	monitorGjcTeam,
 	parseTeamLaunchArgs,
 	readGjcTeamSnapshot,
 	resolveGjcWorkerCommand,
@@ -15,9 +17,10 @@ import {
 } from "../../src/gjc-runtime/team-runtime";
 
 let cleanupRoot: string | undefined;
-function runGit(cwd: string, args: string[]): void {
+function runGit(cwd: string, args: string[]): string {
 	const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
 	if (result.exitCode !== 0) throw new Error(result.stderr.toString() || `git ${args.join(" ")} failed`);
+	return result.stdout.toString().trim();
 }
 
 async function createFakeTmuxBin(
@@ -82,6 +85,36 @@ async function createGitRepo(): Promise<string> {
 	runGit(repo, ["add", "README.md"]);
 	runGit(repo, ["commit", "-m", "initial"]);
 	return repo;
+}
+
+async function readTeamConfig(stateDir: string): Promise<GjcTeamConfig> {
+	return Bun.file(path.join(stateDir, "config.json")).json() as Promise<GjcTeamConfig>;
+}
+
+async function commitFile(cwd: string, relativePath: string, content: string, message: string): Promise<string> {
+	await Bun.write(path.join(cwd, relativePath), content);
+	runGit(cwd, ["add", relativePath]);
+	runGit(cwd, ["commit", "-m", message]);
+	return runGit(cwd, ["rev-parse", "HEAD"]);
+}
+
+async function writeWorkerStatus(
+	stateDir: string,
+	worker: string,
+	state: "idle" | "working" | "blocked" | "done" | "failed" | "draining" | "unknown",
+): Promise<void> {
+	await Bun.write(
+		path.join(stateDir, "workers", worker, "status.json"),
+		`${JSON.stringify({ state, updated_at: new Date().toISOString() }, null, 2)}\n`,
+	);
+}
+
+async function readEvents(stateDir: string): Promise<string> {
+	return Bun.file(path.join(stateDir, "events.jsonl")).text();
+}
+
+async function readMailbox(stateDir: string, worker: string): Promise<string> {
+	return Bun.file(path.join(stateDir, "mailbox", `${worker}.json`)).text();
 }
 
 afterEach(async () => {
@@ -628,5 +661,222 @@ describe("native gjc team runtime", () => {
 			cleanupRoot,
 			{ PATH: "" },
 		);
+	});
+
+	it("monitor integrates dirty detached worker worktrees and records GJC-scoped hygiene artifacts", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Integrate dirty worker",
+			teamName: "integrate-dirty-team",
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		const config = await readTeamConfig(snapshot.state_dir);
+		const worker = config.workers[0];
+		if (!worker?.worktree_path) throw new Error("missing worker worktree");
+		await Bun.write(path.join(worker.worktree_path, "worker-output.txt"), "from worker\n");
+
+		const monitored = await monitorGjcTeam("integrate-dirty-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+
+		expect(await Bun.file(path.join(cleanupRoot, "worker-output.txt")).text()).toBe("from worker\n");
+		const workerState = monitored.integration_by_worker?.["worker-1"];
+		expect(workerState?.status).toBe("idle");
+		expect(workerState?.last_integrated_head).toBeTruthy();
+		const events = await readEvents(snapshot.state_dir);
+		expect(events).toContain("worker_auto_commit");
+		expect(events).toContain("worker_merge_applied");
+		const leaderMailbox = await readMailbox(snapshot.state_dir, "leader-fixed");
+		expect(leaderMailbox).toContain("INTEGRATED: merged worker-1");
+		const ledger = await Bun.file(
+			path.join(cleanupRoot, ".gjc", "reports", "team-commit-hygiene", "integrate-dirty-team.ledger.json"),
+		).json();
+		expect(JSON.stringify(ledger)).toContain("auto_checkpoint");
+		expect(JSON.stringify(ledger)).toContain("integration_merge");
+		expect(await Bun.file(path.join(cleanupRoot, ".omx", "reports", "team-commit-hygiene")).exists()).toBe(false);
+	});
+
+	it("monitor cherry-picks diverged worker commits and stays idempotent on repeated status checks", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Integrate diverged worker",
+			teamName: "diverged-team",
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		const config = await readTeamConfig(snapshot.state_dir);
+		const workerPath = config.workers[0]?.worktree_path;
+		if (!workerPath) throw new Error("missing worker worktree");
+		await commitFile(cleanupRoot, "leader.txt", "leader\n", "leader advances");
+		const workerHead = await commitFile(workerPath, "worker.txt", "worker\n", "worker diverges");
+
+		const first = await monitorGjcTeam("diverged-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+		const leaderAfterFirst = runGit(cleanupRoot, ["rev-parse", "HEAD"]);
+		const second = await monitorGjcTeam("diverged-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+
+		expect(await Bun.file(path.join(cleanupRoot, "worker.txt")).text()).toBe("worker\n");
+		expect(first.integration_by_worker?.["worker-1"]?.last_integrated_head).toBe(workerHead);
+		expect(second.integration_by_worker?.["worker-1"]?.last_integrated_head).toBeTruthy();
+		expect(runGit(cleanupRoot, ["rev-parse", "HEAD"])).toBe(leaderAfterFirst);
+		const events = await readEvents(snapshot.state_dir);
+		expect(events).toContain("worker_cherry_pick_applied");
+		const ledger = await Bun.file(
+			path.join(cleanupRoot, ".gjc", "reports", "team-commit-hygiene", "diverged-team.ledger.json"),
+		).json();
+		expect(JSON.stringify(ledger)).toContain("integration_cherry_pick");
+	});
+
+	it("monitor reports merge conflicts without falsely advancing last integrated head", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Conflict worker",
+			teamName: "merge-conflict-team",
+			worktreeMode: { enabled: true, detached: false, name: "feature/conflict" },
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		const config = await readTeamConfig(snapshot.state_dir);
+		const workerPath = config.workers[0]?.worktree_path;
+		if (!workerPath) throw new Error("missing worker worktree");
+		await commitFile(workerPath, "README.md", "# worker\n", "worker readme");
+		await Bun.write(path.join(cleanupRoot, "README.md"), "# leader dirty\n");
+
+		const monitored = await monitorGjcTeam("merge-conflict-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+
+		const workerState = monitored.integration_by_worker?.["worker-1"];
+		expect(workerState?.status).toBe("merge_conflict");
+		expect(workerState?.last_integrated_head).toBeUndefined();
+		expect(runGit(cleanupRoot, ["status", "--porcelain", "--untracked-files=no"])).toBe("M README.md");
+		expect(await readEvents(snapshot.state_dir)).toContain("worker_merge_conflict");
+		expect(await Bun.file(path.join(snapshot.state_dir, "integration-report.md")).text()).toContain("merge");
+		expect(await readMailbox(snapshot.state_dir, "leader-fixed")).toContain("CONFLICT: merge failed");
+		const ledger = await Bun.file(
+			path.join(cleanupRoot, ".gjc", "reports", "team-commit-hygiene", "merge-conflict-team.ledger.json"),
+		).json();
+		expect(JSON.stringify(ledger)).toContain('"status":"conflict"');
+		expect(JSON.stringify(ledger)).toContain("integration_merge");
+	});
+
+	it("monitor reports cherry-pick conflicts and aborts cleanly", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Cherry pick conflict worker",
+			teamName: "pick-conflict-team",
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		const config = await readTeamConfig(snapshot.state_dir);
+		const workerPath = config.workers[0]?.worktree_path;
+		if (!workerPath) throw new Error("missing worker worktree");
+		await commitFile(workerPath, "README.md", "# worker\n", "worker readme");
+		await fs.rm(path.join(cleanupRoot, "README.md"));
+		runGit(cleanupRoot, ["add", "README.md"]);
+		runGit(cleanupRoot, ["commit", "-m", "leader deletes readme"]);
+
+		const monitored = await monitorGjcTeam("pick-conflict-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+
+		const workerState = monitored.integration_by_worker?.["worker-1"];
+		expect(workerState?.status).toBe("cherry_pick_conflict");
+		expect(workerState?.last_integrated_head).toBeUndefined();
+		expect(runGit(cleanupRoot, ["status", "--porcelain", "--untracked-files=no"])).toBe("");
+		expect(await readEvents(snapshot.state_dir)).toContain("worker_cherry_pick_conflict");
+		expect(await Bun.file(path.join(snapshot.state_dir, "integration-report.md")).text()).toContain("cherry-pick");
+		expect(await readMailbox(snapshot.state_dir, "leader-fixed")).toContain("CONFLICT: cherry-pick failed");
+		const ledger = await Bun.file(
+			path.join(cleanupRoot, ".gjc", "reports", "team-commit-hygiene", "pick-conflict-team.ledger.json"),
+		).json();
+		expect(JSON.stringify(ledger)).toContain('"status":"conflict"');
+		expect(JSON.stringify(ledger)).toContain("integration_cherry_pick");
+	});
+
+	it("cross-rebases idle, done, and failed workers while skipping working workers", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 4,
+			agentType: "executor",
+			task: "Cross rebase workers",
+			teamName: "cross-rebase-team",
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		await writeWorkerStatus(snapshot.state_dir, "worker-1", "idle");
+		await writeWorkerStatus(snapshot.state_dir, "worker-2", "done");
+		await writeWorkerStatus(snapshot.state_dir, "worker-3", "failed");
+		await writeWorkerStatus(snapshot.state_dir, "worker-4", "working");
+		await Bun.write(path.join(snapshot.workers[0]?.worktree_path ?? "", "worker-output.txt"), "integrate\n");
+
+		const monitored = await monitorGjcTeam("cross-rebase-team", cleanupRoot, {
+			PATH: process.env.PATH ?? "",
+			GJC_TEAM_TMUX_COMMAND: fakeTmux,
+		});
+		const leaderHead = runGit(cleanupRoot, ["rev-parse", "HEAD"]);
+
+		expect(monitored.integration_by_worker?.["worker-1"]?.last_rebased_leader_head).toBe(leaderHead);
+		expect(monitored.integration_by_worker?.["worker-2"]?.last_rebased_leader_head).toBe(leaderHead);
+		expect(monitored.integration_by_worker?.["worker-3"]?.last_rebased_leader_head).toBe(leaderHead);
+		expect(monitored.integration_by_worker?.["worker-4"]?.last_rebased_leader_head).toBeUndefined();
+		const events = await readEvents(snapshot.state_dir);
+		expect(events).toContain("worker_cross_rebase_applied");
+		expect(events).toContain("worker_cross_rebase_skipped");
+		const ledger = await Bun.file(
+			path.join(cleanupRoot, ".gjc", "reports", "team-commit-hygiene", "cross-rebase-team.ledger.json"),
+		).json();
+		expect(JSON.stringify(ledger)).toContain("cross_rebase");
+	});
+
+	it("pure team reads and list operations do not trigger integration, while command status and resume are wired to monitor", async () => {
+		cleanupRoot = await createGitRepo();
+		const fakeTmux = await createFakeTmuxBin(cleanupRoot);
+		const snapshot = await startGjcTeam({
+			workerCount: 1,
+			agentType: "executor",
+			task: "Pure reads stay pure",
+			teamName: "pure-read-team",
+			cwd: cleanupRoot,
+			env: { PATH: process.env.PATH ?? "", GJC_TEAM_WORKER_COMMAND: "true", GJC_TEAM_TMUX_COMMAND: fakeTmux },
+		});
+		const config = await readTeamConfig(snapshot.state_dir);
+		const workerPath = config.workers[0]?.worktree_path;
+		if (!workerPath) throw new Error("missing worker worktree");
+		await Bun.write(path.join(workerPath, "unintegrated.txt"), "pending\n");
+
+		const listed = await listGjcTeams(cleanupRoot, { PATH: process.env.PATH ?? "" });
+		const read = await readGjcTeamSnapshot("pure-read-team", cleanupRoot, { PATH: process.env.PATH ?? "" });
+
+		expect(listed).toHaveLength(1);
+		expect(read.integration_by_worker).toBeUndefined();
+		expect(await Bun.file(path.join(cleanupRoot, "unintegrated.txt")).exists()).toBe(false);
+		expect(await Bun.file(path.join(snapshot.state_dir, "monitor-snapshot.json")).exists()).toBe(false);
+		const commandSource = await Bun.file(path.join(import.meta.dir, "../../src/commands/team.ts")).text();
+		expect(commandSource).toContain('action === "status" || action === "resume"');
+		expect(commandSource).toContain("monitorGjcTeam(teamName)");
+		expect(commandSource).toContain("listGjcTeams()");
 	});
 });

@@ -142,8 +142,14 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
    - `GJC_TEAM_WORKER_ID=worker-1`
    - `GJC_TEAM_STATE_ROOT=<leader-cwd>/.gjc/state/team`
    - optional `GJC_TEAM_WORKTREE_PATH=<path>` when worktree mode is active
-7. Store pane/target evidence in config/manifest/snapshot: `tmux_session`, `tmux_session_name`, `tmux_target`, leader pane id, and worker pane id.
-8. Return control to the leader; follow-up uses `status`, `resume`, `shutdown`, and `gjc team api`.
+7. Automatically integrate worker worktree commits during leader monitoring:
+   - dirty worker worktrees are auto-checkpointed before integration
+   - clean-ahead worker history is merged into the leader with a runtime merge commit
+   - diverged worker history is cherry-picked into the leader
+   - idle/done/failed worker worktrees are cross-rebased onto the updated leader after integration; working workers are skipped
+   - conflicts are aborted, recorded, and reported to the leader mailbox without falsely advancing `last_integrated_head`
+8. Store pane/target/integration evidence in config/manifest/snapshot: `tmux_session`, `tmux_session_name`, `tmux_target`, leader pane id, worker pane ids, and `integration_by_worker`.
+9. Return control to the leader; follow-up uses `status`, `resume`, `shutdown`, and `gjc team api`.
 
 Important:
 
@@ -187,8 +193,10 @@ gjc team shutdown <team-name>
 
 Semantics:
 
-- `status`: reads team snapshot (task counts, worker state, tmux target/pane evidence).
-- `resume`: reads the same live team snapshot for reconnect/inspection flows.
+- `status`: mutating monitor path; reads team snapshot and applies pending worker worktree integration before returning task counts, worker state, tmux target/pane evidence, and `integration_by_worker`.
+- `resume`: mutating monitor path; performs the same integration-aware live snapshot for reconnect/inspection flows.
+- `list`: pure read path; lists known teams without integrating worker commits.
+- API/read-only snapshot operations are pure unless explicitly documented as a monitor/status path.
 - `shutdown`: kills the recorded worker pane when it still belongs to the stored tmux target, removes clean created worktrees, marks worker stopped, and marks phase complete. It preserves `.gjc/state/team/<team>` as evidence.
 
 ## Data Plane and Control Plane
@@ -206,8 +214,11 @@ Semantics:
 - `.gjc/state/team/<team>/phase.json`
 - `.gjc/state/team/<team>/events.jsonl`
 - `.gjc/state/team/<team>/telemetry.jsonl`
+- `.gjc/state/team/<team>/monitor-snapshot.json`
+- `.gjc/state/team/<team>/integration-report.md`
 - `.gjc/state/team/<team>/tasks/task-1.json`
 - `.gjc/state/team/<team>/mailbox/worker-1.json`
+- `.gjc/reports/team-commit-hygiene/<team>.ledger.json`
 
 ## Team Mutation Interop (CLI-first)
 
@@ -230,7 +241,8 @@ Worker protocol:
 
 - Claim pending work with `claim-task`.
 - Transition the task to `completed`, `failed`, or `blocked` with `transition-task-status`.
-- Record implementation/verification evidence in normal task output and state files; do not assume a separate leader confirmation mailbox or queue exists.
+- Commit or leave worktree changes in the worker worktree; the leader `status`/`resume` monitor path will auto-checkpoint dirty worktrees and integrate committed history where possible.
+- Record implementation/verification evidence in normal task output and state files; leader integration/conflict notifications are delivered through `.gjc/state/team/<team>/mailbox/leader-fixed.json`.
 
 ## Environment Knobs
 
@@ -256,6 +268,7 @@ Operator note (important for GJC panes):
 - **Split failure:** startup records a failed phase if state was already initialized, rolls back created worktrees, and never kills the leader tmux session.
 - **Worker API ENOENT:** team state is missing or `GJC_TEAM_STATE_ROOT` points somewhere else. Check `.gjc/state/team/<team>/` before assuming worker failure.
 - **Stale pane on shutdown:** shutdown only kills a recorded worker pane when it still belongs to the stored `tmux_target` and is not the leader pane. Stale panes outside that target require manual inspection.
+- **Integration conflict:** `gjc team status <team>` / `resume` aborts the failing merge, cherry-pick, or worker rebase; inspect `.gjc/state/team/<team>/integration-report.md`, `.gjc/state/team/<team>/events.jsonl`, `.gjc/state/team/<team>/mailbox/leader-fixed.json`, and `.gjc/reports/team-commit-hygiene/<team>.ledger.json`.
 
 ### Safe Manual Intervention (last resort)
 
