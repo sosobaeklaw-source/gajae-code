@@ -5,8 +5,14 @@ import {
 	consumePendingGoalModeRequest,
 	isUltragoalCreateGoalsInvocation,
 	readUltragoalCodexObjective,
+	writeCurrentSessionGoalModeState,
 	writePendingGoalModeRequest,
 } from "@gajae-code/coding-agent/gjc-runtime/goal-mode-request";
+import {
+	buildSessionContext,
+	loadEntriesFromFile,
+	type SessionEntry,
+} from "@gajae-code/coding-agent/session/session-manager";
 
 const tempRoots: string[] = [];
 
@@ -51,6 +57,83 @@ describe("GJC ultragoal goal mode request", () => {
 		expect(request?.objective).toBe("Complete ultragoal");
 		expect(request?.source).toBe("ultragoal");
 		expect(consumedAgain).toBeNull();
+	});
+
+	it("writes goal mode state into the current session file", async () => {
+		const root = await tempDir();
+		const sessionFile = path.join(root, "session.jsonl");
+		const timestamp = new Date().toISOString();
+		await Bun.write(
+			sessionFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "session-1", timestamp, cwd: root }),
+				JSON.stringify({
+					type: "message",
+					id: "user-1",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: [{ type: "text", text: "start ultragoal" }] },
+				}),
+				"",
+			].join("\n"),
+		);
+
+		const result = await writeCurrentSessionGoalModeState({
+			sessionFile,
+			objective: "Complete generated ultragoal plan",
+		});
+		const entries = (await loadEntriesFromFile(sessionFile)).filter(
+			(entry): entry is SessionEntry => entry.type !== "session",
+		);
+		const context = buildSessionContext(entries);
+
+		expect(result.status).toBe("updated");
+		expect(context.mode).toBe("goal");
+		expect(context.modeData?.goal).toMatchObject({
+			objective: "Complete generated ultragoal plan",
+			status: "active",
+			tokensUsed: 0,
+		});
+	});
+
+	it("does not overwrite an existing active session goal", async () => {
+		const root = await tempDir();
+		const sessionFile = path.join(root, "session.jsonl");
+		const timestamp = new Date().toISOString();
+		const existingGoal = {
+			id: "goal-1",
+			objective: "Existing goal",
+			status: "active" as const,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 1,
+			updatedAt: 1,
+		};
+		await Bun.write(
+			sessionFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "session-1", timestamp, cwd: root }),
+				JSON.stringify({
+					type: "mode_change",
+					id: "mode-1",
+					parentId: null,
+					timestamp,
+					mode: "goal",
+					data: { goal: existingGoal },
+				}),
+				"",
+			].join("\n"),
+		);
+
+		const before = await Bun.file(sessionFile).text();
+		const result = await writeCurrentSessionGoalModeState({
+			sessionFile,
+			objective: "New ultragoal objective",
+		});
+		const after = await Bun.file(sessionFile).text();
+
+		expect(result).toEqual({ status: "existing_goal", goal: existingGoal });
+		expect(after).toBe(before);
 	});
 
 	it("surfaces corrupt pending request json", async () => {

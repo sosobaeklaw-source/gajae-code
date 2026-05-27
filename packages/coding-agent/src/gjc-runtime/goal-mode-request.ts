@@ -1,5 +1,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Snowflake } from "@gajae-code/utils";
+import type { Goal, GoalModeState } from "../goals/state";
+import {
+	buildSessionContext,
+	loadEntriesFromFile,
+	type ModeChangeEntry,
+	type SessionEntry,
+} from "../session/session-manager";
+
 export const GJC_SESSION_FILE_ENV = "GJC_SESSION_FILE";
 export const GJC_SESSION_ID_ENV = "GJC_SESSION_ID";
 export const GJC_SESSION_CWD_ENV = "GJC_SESSION_CWD";
@@ -16,6 +25,11 @@ export interface PendingGoalModeRequest {
 	createdAt: string;
 	goalsPath?: string;
 }
+
+export type CurrentSessionGoalModeWriteResult =
+	| { status: "unavailable"; reason: "missing_session_file" | "empty_session_file" }
+	| { status: "existing_goal"; goal: Goal }
+	| { status: "updated"; goal: Goal; sessionFile: string };
 
 interface UltragoalPlanShape {
 	codexObjective?: unknown;
@@ -77,6 +91,87 @@ export async function writePendingGoalModeRequest(input: {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await Bun.write(filePath, `${JSON.stringify(request, null, 2)}\n`);
 	return request;
+}
+
+function goalFromModeData(modeData: Record<string, unknown> | undefined): Goal | null {
+	const candidate = modeData?.goal;
+	if (typeof candidate !== "object" || candidate === null) return null;
+	const goal = candidate as Partial<Goal>;
+	if (
+		typeof goal.id !== "string" ||
+		typeof goal.objective !== "string" ||
+		typeof goal.status !== "string" ||
+		typeof goal.tokensUsed !== "number" ||
+		typeof goal.timeUsedSeconds !== "number" ||
+		typeof goal.createdAt !== "number" ||
+		typeof goal.updatedAt !== "number"
+	) {
+		return null;
+	}
+	if (!["active", "paused", "budget-limited", "complete", "dropped"].includes(goal.status)) {
+		return null;
+	}
+	return goal as Goal;
+}
+
+function isNonTerminalGoal(goal: Goal | null): goal is Goal {
+	return goal !== null && goal.status !== "complete" && goal.status !== "dropped";
+}
+
+function createGoalModeState(objective: string): GoalModeState {
+	const now = Date.now();
+	const goal: Goal = {
+		id: String(Snowflake.next()),
+		objective,
+		status: "active",
+		tokensUsed: 0,
+		timeUsedSeconds: 0,
+		createdAt: now,
+		updatedAt: now,
+	};
+	return { enabled: true, mode: "active", goal };
+}
+
+function nextSessionEntryId(entries: readonly SessionEntry[]): string {
+	const existing = new Set(entries.map(entry => entry.id));
+	for (let index = 0; index < 100; index++) {
+		const id = crypto.randomUUID().slice(-8);
+		if (!existing.has(id)) return id;
+	}
+	return String(Snowflake.next());
+}
+
+export async function writeCurrentSessionGoalModeState(input: {
+	sessionFile?: string | null;
+	objective: string;
+}): Promise<CurrentSessionGoalModeWriteResult> {
+	const sessionFile = input.sessionFile?.trim();
+	if (!sessionFile) return { status: "unavailable", reason: "missing_session_file" };
+
+	const objective = input.objective.trim();
+	if (!objective) throw new Error("goal objective is required");
+
+	const fileEntries = await loadEntriesFromFile(sessionFile);
+	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	if (fileEntries.length === 0) return { status: "unavailable", reason: "empty_session_file" };
+
+	const context = buildSessionContext(entries);
+	const existingGoal = goalFromModeData(context.modeData);
+	if ((context.mode === "goal" || context.mode === "goal_paused") && isNonTerminalGoal(existingGoal)) {
+		return { status: "existing_goal", goal: existingGoal };
+	}
+
+	const state = createGoalModeState(objective);
+	const entry: ModeChangeEntry = {
+		type: "mode_change",
+		id: nextSessionEntryId(entries),
+		parentId: entries.at(-1)?.id ?? null,
+		timestamp: new Date().toISOString(),
+		mode: "goal",
+		data: { goal: state.goal },
+	};
+	await fs.appendFile(sessionFile, `${JSON.stringify(entry)}\n`);
+	return { status: "updated", goal: state.goal, sessionFile };
 }
 
 export async function consumePendingGoalModeRequest(cwd: string): Promise<PendingGoalModeRequest | null> {

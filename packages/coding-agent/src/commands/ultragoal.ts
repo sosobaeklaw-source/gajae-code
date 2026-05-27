@@ -1,7 +1,9 @@
 import { Command } from "@gajae-code/utils/cli";
 import {
+	GJC_SESSION_FILE_ENV,
 	isUltragoalCreateGoalsInvocation,
 	readUltragoalCodexObjective,
+	writeCurrentSessionGoalModeState,
 	writePendingGoalModeRequest,
 } from "../gjc-runtime/goal-mode-request";
 import { runGjcRuntimeBridge } from "./gjc-runtime-bridge";
@@ -20,6 +22,12 @@ export default class Ultragoal extends Command {
 
 		const cwd = process.cwd();
 		const { objective, goalsPath } = await readUltragoalCodexObjective(cwd);
-		await writePendingGoalModeRequest({ cwd, objective, goalsPath });
+		const sessionWrite = await writeCurrentSessionGoalModeState({
+			sessionFile: process.env[GJC_SESSION_FILE_ENV],
+			objective,
+		});
+		if (sessionWrite.status !== "existing_goal") {
+			await writePendingGoalModeRequest({ cwd, objective, goalsPath });
+		}
 	}
 }
