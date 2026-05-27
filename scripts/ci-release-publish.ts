@@ -211,12 +211,20 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 		console.log(`Skipping ${name} (private)`);
 		return;
 	}
+	const version = typeof manifest.version === "string" ? manifest.version : undefined;
+	if (!isDryRun && version !== undefined) {
+		const existing = await $`npm view ${`${name}@${version}`} version --json`.quiet().nothrow();
+		if (existing.exitCode === 0) {
+			console.log(`Skipping ${name}@${version} (already published)`);
+			return;
+		}
+	}
 	if (isDryRun) {
-		console.log(`DRY RUN bun publish --access public --tolerate-republish (${pkg.dir})`);
+		console.log(`DRY RUN npm publish --access public (${pkg.dir})`);
 		return;
 	}
 	console.log(`Publishing ${name}…`);
-	const result = await $`bun publish --access public --tolerate-republish`.cwd(pkgDir).quiet().nothrow();
+	const result = await $`npm publish --access public`.cwd(pkgDir).quiet().nothrow();
 	const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
 	if (output) console.log(output);
 	if (result.exitCode !== 0) process.exit(result.exitCode ?? 1);
