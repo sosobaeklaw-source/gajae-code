@@ -184,6 +184,23 @@ Project executor override body.
 		expect(ultragoal).toContain("become unrecoverably wrong");
 	});
 
+	it("documents leader-owned Ultragoal checkpoints for Team bridge workers", async () => {
+		const team = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "gjc", "skills", "team", "SKILL.md"),
+		).text();
+		const ultragoal = await Bun.file(
+			path.join(repoRoot, "packages", "coding-agent", "src", "defaults", "gjc", "skills", "ultragoal", "SKILL.md"),
+		).text();
+
+		for (const content of [team, ultragoal]) {
+			expect(content).toContain("fresh `get_goal` snapshot");
+			expect(content).toContain("Workers must not run `gjc ultragoal checkpoint`");
+			expect(content).toContain("checkpoint authority stays with the leader");
+			expect(content).toContain("Ultragoal does not auto-launch Team");
+			expect(content).toContain("performs no hidden goal mutation");
+		}
+	});
+
 	it("keeps bundled deep-interview skill on GJC-native workflow vocabulary", () => {
 		const deepInterview = getDefaultGjcDefinitions().find(definition => definition.name === "deep-interview");
 		expect(deepInterview).toBeDefined();
@@ -192,8 +209,9 @@ Project executor override body.
 		for (const required of ["ask", ".gjc/state", "pending approval"]) {
 			expect(content).toContain(required);
 		}
-		expect(content).toMatch(/\/skill:ralplan|gjc ralplan/);
-		expect(content).toMatch(/\/skill:team|gjc team/);
+		expect(content).toContain("/skill:ralplan");
+		expect(content).toContain("/skill:team");
+		expect(content).toContain("private runtime bridge");
 
 		for (const forbidden of [
 			"AskUserQuestion",
@@ -203,6 +221,7 @@ Project executor override body.
 			"Skill(",
 			"gajae-code:",
 			"/gajae-code",
+			"gjc deep-interview",
 		]) {
 			expect(content).not.toContain(forbidden);
 		}

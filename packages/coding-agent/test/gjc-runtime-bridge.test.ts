@@ -33,11 +33,21 @@ describe("gjc runtime bridge", () => {
 		expect(await readFile(logPath, "utf-8")).toBe("1|ultragoal|status|--json\n");
 	});
 
-	it("returns an actionable error when no runtime is available", () => {
-		const result = runGjcRuntimeBridge("team", ["api"], { PATH: "" });
+	it("suggests the bundled skill entrypoint for bridged workflow skills", () => {
+		const result = runGjcRuntimeBridge("ralplan", ["--consensus"], { PATH: "" });
 
 		expect(result.status).toBe(1);
-		expect(result.error).toContain("gjc team requires the private GJC runtime endpoint implementation");
+		expect(result.error).toContain("gjc ralplan is a private runtime bridge command");
+		expect(result.error).toContain("Inside a GJC agent session, invoke /skill:ralplan instead");
 		expect(result.error).toContain("GJC_RUNTIME_BINARY");
+	});
+
+	it("does not suggest skill activation for bridged utility endpoints", () => {
+		const result = runGjcRuntimeBridge("state", ["read"], { PATH: "" });
+
+		expect(result.status).toBe(1);
+		expect(result.error).toContain("gjc state is a private runtime bridge command");
+		expect(result.error).toContain("Configure GJC_RUNTIME_BINARY with a GJC-compatible private runtime binary");
+		expect(result.error).not.toContain("/skill:state");
 	});
 });

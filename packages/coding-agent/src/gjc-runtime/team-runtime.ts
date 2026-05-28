@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { applyGjcTmuxProfile } from "./launch-tmux";
 
 export type GjcTeamPhase = "starting" | "running" | "complete" | "failed" | "cancelled";
 export type GjcTeamTaskStatus = "pending" | "blocked" | "in_progress" | "completed" | "failed";
@@ -263,7 +264,12 @@ interface GitResult {
 }
 interface GjcTeamCommitHygieneEntry {
 	recorded_at: string;
-	operation: "auto_checkpoint" | "integration_merge" | "integration_cherry_pick" | "cross_rebase";
+	operation:
+		| "auto_checkpoint"
+		| "leader_integration_attempt"
+		| "integration_merge"
+		| "integration_cherry_pick"
+		| "cross_rebase";
 	worker_name: string;
 	task_id?: string;
 	status: "applied" | "skipped" | "conflict" | "failed";
@@ -275,6 +281,23 @@ interface GjcTeamCommitHygieneEntry {
 	worker_head_after?: string | null;
 	worktree_path?: string;
 	detail: string;
+}
+
+interface GjcWorkerIntegrationDedupeState {
+	last_requested_fingerprint?: string;
+	last_requested_head?: string | null;
+	last_requested_status?: GjcWorkerCheckpointClassification["kind"];
+	last_requested_at?: string;
+}
+
+export interface GjcWorkerIntegrationAttemptRequestResult {
+	requested: boolean;
+	reason: "requested" | "not_worker" | "missing_worktree" | "no_changes" | "deduped" | "git_error";
+	worker?: string;
+	team_name?: string;
+	fingerprint?: string;
+	head?: string | null;
+	status?: GjcWorkerCheckpointClassification["kind"];
 }
 
 function isGjcTeamTaskStatus(value: string): value is GjcTeamTaskStatus {
@@ -363,6 +386,9 @@ function mailboxPath(dir: string, worker: string): string {
 }
 function workerDir(dir: string, worker: string): string {
 	return path.join(dir, "workers", worker);
+}
+function workerIntegrationDedupePath(dir: string, worker: string): string {
+	return path.join(workerDir(dir, worker), "posttooluse-dedupe.json");
 }
 
 export function resolveGjcTeamStateRoot(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
@@ -679,7 +705,12 @@ function buildInitialTasks(task: string, workers: GjcTeamWorker[]): GjcTeamTask[
 	}));
 }
 
-async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: boolean): Promise<GjcTeamWorker[]> {
+async function startTmuxSession(
+	config: GjcTeamConfig,
+	dir: string,
+	dryRun: boolean,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<GjcTeamWorker[]> {
 	if (dryRun) return config.workers.map(worker => ({ ...worker, pane_id: `%dry-run-${worker.id}` }));
 	const rollbackPaneIds: string[] = [];
 	try {
@@ -740,6 +771,23 @@ async function startTmuxSession(config: GjcTeamConfig, dir: string, dryRun: bool
 				stderr: "ignore",
 			});
 		}
+		const profileResult = applyGjcTmuxProfile({
+			tmuxCommand: config.tmux_command,
+			target: config.tmux_target,
+			cwd: config.leader.cwd,
+			env,
+		});
+		await appendTelemetry(dir, {
+			type: "tmux_profile_applied",
+			message: profileResult.skipped
+				? "Skipped GJC scoped tmux profile"
+				: "Applied GJC scoped tmux profile to team tmux target",
+			data: {
+				tmux_target: config.tmux_target,
+				command_count: profileResult.commands.length,
+				failure_count: profileResult.failures.length,
+			},
+		});
 		await appendTelemetry(dir, {
 			type: "tmux_started",
 			message: "Started gjc team worker panes in current tmux window",
@@ -843,6 +891,72 @@ function listConflictFiles(cwd: string): string[] {
 		.map(line => line.trim())
 		.filter(Boolean);
 }
+
+export type GjcWorkerCheckpointClassification =
+	| { kind: "clean"; files: string[] }
+	| { kind: "eligible"; files: string[] }
+	| { kind: "protected_only"; files: string[] }
+	| { kind: "conflicted"; files: string[] }
+	| { kind: "git_error"; files: string[]; detail: string };
+
+const UNMERGED_GIT_STATUS_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+const PROTECTED_WORKER_CHECKPOINT_PREFIXES = [
+	".gjc/state/",
+	".gjc/logs/",
+	".gjc/reports/",
+	".gjc/tmp/",
+	".gjc/ultragoal/",
+];
+
+function parsePorcelainStatusFiles(stdout: string): string[] {
+	return stdout
+		.split(/\r?\n/)
+		.map(line => line.trimEnd())
+		.filter(Boolean)
+		.map(line => line.slice(3).trim())
+		.filter(Boolean);
+}
+
+function normalizeGitStatusPath(filePath: string): string {
+	return (filePath.split(" -> ").at(-1) ?? filePath).replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+export function classifyGjcTeamCheckpointFiles(files: string[]): { eligible: string[]; protected: string[] } {
+	const eligible: string[] = [];
+	const protectedFiles: string[] = [];
+	for (const file of files) {
+		const normalized = normalizeGitStatusPath(file);
+		if (
+			PROTECTED_WORKER_CHECKPOINT_PREFIXES.some(
+				prefix => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix),
+			)
+		)
+			protectedFiles.push(file);
+		else eligible.push(file);
+	}
+	return { eligible, protected: protectedFiles };
+}
+
+export function classifyWorkerCheckpointStatus(cwd: string): GjcWorkerCheckpointClassification {
+	const status = runGitResult(cwd, ["status", "--porcelain", "-uall"]);
+	if (!status.ok) {
+		return { kind: "git_error", files: [], detail: status.stderr || status.stdout || "git status failed" };
+	}
+	if (!status.stdout.trim()) return { kind: "clean", files: [] };
+	const files = parsePorcelainStatusFiles(status.stdout);
+	const hasUnmergedStatus = status.stdout
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.some(line => UNMERGED_GIT_STATUS_CODES.has(line.slice(0, 2)));
+	const conflictFiles = listConflictFiles(cwd);
+	if (hasUnmergedStatus || conflictFiles.length > 0) {
+		return { kind: "conflicted", files: conflictFiles.length > 0 ? conflictFiles : files };
+	}
+	const classified = classifyGjcTeamCheckpointFiles(files);
+	if (classified.eligible.length === 0 && classified.protected.length > 0)
+		return { kind: "protected_only", files: classified.protected };
+	return { kind: "eligible", files: classified.eligible };
+}
 async function appendIntegrationEvent(
 	dir: string,
 	type: string,
@@ -866,15 +980,39 @@ async function notifyLeader(
 ): Promise<void> {
 	await sendGjcTeamMessage(config.team_name, worker.id, "leader-fixed", body, cwd, env).catch(() => undefined);
 }
-function autoCommitDirtyWorker(worker: GjcTeamWorker): { committed: boolean; commit: string | null } {
-	if (!worker.worktree_path) return { committed: false, commit: null };
-	const status = runGitResult(worker.worktree_path, ["status", "--porcelain"]);
-	if (!status.ok || !status.stdout.trim()) return { committed: false, commit: null };
-	if (!runGitResult(worker.worktree_path, ["add", "-A"]).ok) return { committed: false, commit: null };
+async function notifyWorker(
+	config: GjcTeamConfig,
+	worker: GjcTeamWorker,
+	body: string,
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+): Promise<void> {
+	await sendGjcTeamMessage(config.team_name, "leader-fixed", worker.id, body, cwd, env).catch(() => undefined);
+}
+async function notifyIntegrationConflict(
+	config: GjcTeamConfig,
+	worker: GjcTeamWorker,
+	body: string,
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+): Promise<void> {
+	await Promise.all([notifyLeader(config, worker, body, cwd, env), notifyWorker(config, worker, body, cwd, env)]);
+}
+function autoCommitDirtyWorker(worker: GjcTeamWorker): {
+	committed: boolean;
+	commit: string | null;
+	classification: GjcWorkerCheckpointClassification | null;
+} {
+	const empty = { committed: false, commit: null, classification: null };
+	if (!worker.worktree_path) return empty;
+	const classification = classifyWorkerCheckpointStatus(worker.worktree_path);
+	if (classification.kind !== "eligible") return { ...empty, classification };
+	if (!runGitResult(worker.worktree_path, ["add", "--", ...classification.files]).ok)
+		return { ...empty, classification };
 	const message = `gjc(team): auto-checkpoint ${worker.id} [${worker.assigned_tasks[0] ?? "unknown"}]`;
 	if (!runGitResult(worker.worktree_path, ["commit", "--no-verify", "-m", message]).ok)
-		return { committed: false, commit: null };
-	return { committed: true, commit: resolveHead(worker.worktree_path) };
+		return { ...empty, classification };
+	return { committed: true, commit: resolveHead(worker.worktree_path), classification };
 }
 function workerMergeRef(worker: GjcTeamWorker, workerHead: string): string {
 	if (!worker.worktree_path) return workerHead;
@@ -939,15 +1077,7 @@ async function integrateGjcWorkerCommits(
 		}
 		if (isAncestor(worker.worktree_path, leaderHead, workerHead)) {
 			const mergeRef = workerMergeRef(worker, workerHead);
-			const merge = runGitResult(leaderCwd, [
-				"merge",
-				"--no-ff",
-				"-X",
-				"theirs",
-				"-m",
-				`gjc(team): merge ${worker.id}`,
-				mergeRef,
-			]);
+			const merge = runGitResult(leaderCwd, ["merge", "--no-ff", "-m", `gjc(team): merge ${worker.id}`, mergeRef]);
 			if (merge.ok) {
 				const newLeaderHead = resolveHead(leaderCwd);
 				if (newLeaderHead && newLeaderHead !== leaderHead && isAncestor(leaderCwd, workerHead, "HEAD")) {
@@ -1029,12 +1159,12 @@ async function integrateGjcWorkerCommits(
 					worker: worker.id,
 					operation: "merge",
 					files: conflictFiles,
-					detail: `merge --no-ff -X theirs failed and was aborted: ${(merge.stderr || merge.stdout).slice(0, 200)}`,
+					detail: `merge --no-ff failed and was aborted: ${(merge.stderr || merge.stdout).slice(0, 200)}`,
 				});
-				await notifyLeader(
+				await notifyIntegrationConflict(
 					config,
 					worker,
-					`CONFLICT: merge failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}.`,
+					`CONFLICT: merge failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}. Manual resolution required; runtime aborted the merge and did not auto-resolve.`,
 					cwd,
 					env,
 				);
@@ -1061,7 +1191,7 @@ async function integrateGjcWorkerCommits(
 				: leaderHead;
 		const commits = listCommitRange(worker.worktree_path, baseline, workerHead);
 		for (const commit of commits) {
-			const pick = runGitResult(leaderCwd, ["cherry-pick", "--allow-empty", "-X", "theirs", commit]);
+			const pick = runGitResult(leaderCwd, ["cherry-pick", "--allow-empty", commit]);
 			if (!pick.ok) {
 				const conflictFiles = listConflictFiles(leaderCwd);
 				runGitResult(leaderCwd, ["cherry-pick", "--abort"]);
@@ -1082,12 +1212,12 @@ async function integrateGjcWorkerCommits(
 					worker: worker.id,
 					operation: "cherry-pick",
 					files: conflictFiles,
-					detail: `cherry-pick -X theirs failed and was aborted: ${(pick.stderr || pick.stdout).slice(0, 200)}`,
+					detail: `cherry-pick failed and was aborted: ${(pick.stderr || pick.stdout).slice(0, 200)}`,
 				});
-				await notifyLeader(
+				await notifyIntegrationConflict(
 					config,
 					worker,
-					`CONFLICT: cherry-pick failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}.`,
+					`CONFLICT: cherry-pick failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}. Manual resolution required; runtime aborted the cherry-pick and did not auto-resolve.`,
 					cwd,
 					env,
 				);
@@ -1199,7 +1329,7 @@ async function integrateGjcWorkerCommits(
 				continue;
 			}
 			const before = resolveHead(worker.worktree_path);
-			const rebase = runGitResult(worker.worktree_path, ["rebase", "-X", "ours", newLeaderHead]);
+			const rebase = runGitResult(worker.worktree_path, ["rebase", newLeaderHead]);
 			if (rebase.ok) {
 				const after = resolveHead(worker.worktree_path);
 				integrationByWorker[worker.id] = {
@@ -1248,12 +1378,12 @@ async function integrateGjcWorkerCommits(
 					worker: worker.id,
 					operation: "rebase",
 					files: conflictFiles,
-					detail: `rebase -X ours failed and was aborted: ${(rebase.stderr || rebase.stdout).slice(0, 200)}`,
+					detail: `rebase failed and was aborted: ${(rebase.stderr || rebase.stdout).slice(0, 200)}`,
 				});
-				await notifyLeader(
+				await notifyIntegrationConflict(
 					config,
 					worker,
-					`CONFLICT: cross-rebase failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}.`,
+					`CONFLICT: cross-rebase failed for ${worker.id}; files: ${conflictFiles.join(",") || "unknown"}. Manual resolution required; runtime aborted the rebase and did not auto-resolve.`,
 					cwd,
 					env,
 				);
@@ -1379,7 +1509,7 @@ export async function startGjcTeam(options: GjcTeamStartOptions): Promise<GjcTea
 	});
 	let tmuxWorkers: GjcTeamWorker[];
 	try {
-		tmuxWorkers = await startTmuxSession(config, dir, options.dryRun ?? false);
+		tmuxWorkers = await startTmuxSession(config, dir, options.dryRun ?? false, env);
 	} catch (error) {
 		await writePhase(dir, "failed");
 		await appendEvent(dir, {
@@ -1433,6 +1563,92 @@ export async function readGjcTeamSnapshot(
 		updated_at: config.updated_at,
 	};
 }
+function workerIntegrationFingerprint(head: string | null, classification: GjcWorkerCheckpointClassification): string {
+	return `${head ?? "no-head"}:${classification.kind}:${classification.files.join("\0")}`;
+}
+
+export async function requestGjcWorkerIntegrationAttempt(
+	cwd = process.cwd(),
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<GjcWorkerIntegrationAttemptRequestResult> {
+	const teamName = env.GJC_TEAM_NAME?.trim();
+	const worker = env.GJC_TEAM_WORKER_ID?.trim() || env.GJC_TEAM_INTERNAL_WORKER?.split("/").pop()?.trim();
+	if (!teamName || !worker) return { requested: false, reason: "not_worker" };
+	const dir = await findTeamDir(teamName, cwd, env);
+	const config = await readConfig(dir);
+	const configuredWorker = config.workers.find(candidate => candidate.id === worker);
+	const worktreePath = env.GJC_TEAM_WORKTREE_PATH?.trim() || configuredWorker?.worktree_path;
+	if (!worktreePath || !(await pathExists(worktreePath)))
+		return { requested: false, reason: "missing_worktree", worker, team_name: teamName };
+	const classification = classifyWorkerCheckpointStatus(worktreePath);
+	const head = resolveHead(worktreePath);
+	if (classification.kind === "git_error") {
+		return { requested: false, reason: "git_error", worker, team_name: teamName, head, status: classification.kind };
+	}
+	if (classification.kind === "protected_only") {
+		return { requested: false, reason: "no_changes", worker, team_name: teamName, head, status: classification.kind };
+	}
+	if (classification.kind === "clean" && configuredWorker?.worktree_base_ref === head) {
+		return { requested: false, reason: "no_changes", worker, team_name: teamName, head, status: classification.kind };
+	}
+	const fingerprint = workerIntegrationFingerprint(head, classification);
+	const dedupePath = workerIntegrationDedupePath(dir, worker);
+	const dedupe = (await readJsonFile<GjcWorkerIntegrationDedupeState>(dedupePath)) ?? {};
+	if (dedupe.last_requested_fingerprint === fingerprint) {
+		return {
+			requested: false,
+			reason: "deduped",
+			worker,
+			team_name: teamName,
+			fingerprint,
+			head,
+			status: classification.kind,
+		};
+	}
+	await writeJsonFile(dedupePath, {
+		last_requested_fingerprint: fingerprint,
+		last_requested_head: head,
+		last_requested_status: classification.kind,
+		last_requested_at: now(),
+	} satisfies GjcWorkerIntegrationDedupeState);
+	await appendEvent(dir, {
+		type: "worker_integration_attempt_requested",
+		worker,
+		message: `Worker ${worker} requested leader integration attempt`,
+		data: { worker_name: worker, worker_head: head, status: classification.kind, files: classification.files },
+	});
+	await sendGjcTeamMessage(
+		teamName,
+		worker,
+		"leader-fixed",
+		`INTEGRATION REQUESTED: ${worker} has ${classification.kind} git changes at ${head?.slice(0, 12) ?? "unknown-head"}.`,
+		cwd,
+		env,
+	).catch(() => undefined);
+	await appendCommitHygieneEntries(config, [
+		{
+			recorded_at: now(),
+			operation: "leader_integration_attempt",
+			worker_name: worker,
+			task_id: configuredWorker?.assigned_tasks[0],
+			status: "applied",
+			source_commit: head ?? undefined,
+			worker_head_after: head,
+			worktree_path: worktreePath,
+			detail: "Worker turn-end requested a leader integration attempt for semantic git changes.",
+		},
+	]);
+	return {
+		requested: true,
+		reason: "requested",
+		worker,
+		team_name: teamName,
+		fingerprint,
+		head,
+		status: classification.kind,
+	};
+}
+
 export async function monitorGjcTeam(
 	teamName: string,
 	cwd = process.cwd(),
@@ -1470,6 +1686,13 @@ export async function shutdownGjcTeam(
 ): Promise<GjcTeamSnapshot> {
 	const dir = await findTeamDir(teamName, cwd, env);
 	const config = await readConfig(dir);
+	const tasks = await readTasks(dir);
+	const shutdownPhase: GjcTeamPhase =
+		tasks.length === 0 || tasks.every(task => task.status === "completed")
+			? "complete"
+			: tasks.some(task => task.status === "failed" || task.status === "blocked")
+				? "failed"
+				: "cancelled";
 	killWorkerPanes(config);
 	await removeCleanCreatedWorktrees(config.workers);
 	const stopped = {
@@ -1478,9 +1701,19 @@ export async function shutdownGjcTeam(
 		updated_at: now(),
 	};
 	await writeJsonFile(path.join(dir, "config.json"), stopped);
-	await writePhase(dir, "complete");
-	await appendEvent(dir, { type: "team_shutdown", message: "Shut down native gjc team runtime" });
-	await appendTelemetry(dir, { type: "team_shutdown", message: "Native gjc team runtime stopped" });
+	await writePhase(dir, shutdownPhase);
+	await appendEvent(dir, {
+		type: "team_shutdown",
+		message:
+			shutdownPhase === "complete"
+				? "Shut down native gjc team runtime after completed tasks"
+				: "Shut down native gjc team runtime with incomplete tasks",
+		data: { phase: shutdownPhase },
+	});
+	await appendTelemetry(dir, {
+		type: "team_shutdown",
+		message: `Native gjc team runtime stopped with phase ${shutdownPhase}`,
+	});
 	return readGjcTeamSnapshot(config.team_name, cwd, env);
 }
 
