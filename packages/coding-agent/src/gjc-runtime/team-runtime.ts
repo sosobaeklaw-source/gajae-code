@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
+import type { WorkflowHudSummary } from "../skill-state/active-state";
+import { buildTeamHudSummary as buildWorkflowTeamHudSummary } from "../skill-state/workflow-hud";
 export type GjcTeamPhase = "starting" | "running" | "complete" | "failed" | "cancelled";
 export type GjcTeamTaskStatus = "pending" | "blocked" | "in_progress" | "completed" | "failed";
 export type GjcWorkerStatusState = "idle" | "working" | "blocked" | "done" | "failed" | "draining" | "unknown";
@@ -235,7 +236,7 @@ interface GjcTmuxLeaderContext {
 	leaderPaneId: string;
 	target: string;
 }
-interface GjcTeamEvent {
+export interface GjcTeamEvent {
 	event_id: string;
 	ts: string;
 	type: string;
@@ -1432,6 +1433,21 @@ export async function readGjcTeamSnapshot(
 		integration_by_worker: monitor?.integration_by_worker,
 		updated_at: config.updated_at,
 	};
+}
+export async function buildTeamHudSummary(
+	snapshot: GjcTeamSnapshot,
+	latestEvent?: GjcTeamEvent,
+	latestMessage?: GjcTeamMailboxMessage,
+): Promise<WorkflowHudSummary> {
+	return buildWorkflowTeamHudSummary({
+		phase: snapshot.phase,
+		task_total: snapshot.task_total,
+		task_counts: snapshot.task_counts,
+		workers: snapshot.workers,
+		updated_at: snapshot.updated_at,
+		latestEvent,
+		latestMessage,
+	});
 }
 export async function monitorGjcTeam(
 	teamName: string,

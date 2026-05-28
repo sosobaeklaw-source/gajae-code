@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { isUltragoalBypassPrompt, readUltragoalVerificationState } from "../gjc-runtime/ultragoal-guard";
 import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
+import type { SkillActiveEntry as CanonicalSkillActiveEntry, WorkflowHudSummary } from "../skill-state/active-state";
 import {
 	compareSkillKeywordMatches,
 	GJC_SKILL_KEYWORD_DEFINITIONS,
@@ -72,7 +73,7 @@ export interface SkillKeywordMatch {
 	priority: number;
 }
 
-export interface SkillActiveEntry {
+export interface SkillActiveEntry extends Omit<CanonicalSkillActiveEntry, "skill"> {
 	skill: GjcWorkflowSkill;
 	phase?: string;
 	active?: boolean;
@@ -81,6 +82,8 @@ export interface SkillActiveEntry {
 	session_id?: string;
 	thread_id?: string;
 	turn_id?: string;
+	hud?: WorkflowHudSummary;
+	stale?: boolean;
 }
 
 export interface SkillActiveState {
@@ -393,12 +396,15 @@ export async function buildActiveUltragoalPromptContext(input: UserPromptSubmitS
 			: typeof visibleModeState.state.gjcObjective === "string"
 				? visibleModeState.state.gjcObjective
 				: "");
+	if (input.prompt && isUltragoalBypassPrompt(input.prompt) && !objective) {
+		return "BLOCK_ULTRAGOAL_COMPLETION: Active Ultragoal completion requires a current goal objective and a fresh verification receipt before completion.";
+	}
 	if (input.prompt && isUltragoalBypassPrompt(input.prompt) && objective) {
 		const diagnostic = await readUltragoalVerificationState({
 			cwd: input.cwd,
 			currentGoal: { objective },
 		});
-		if (!["inactive", "unrelated_goal", "active_verified_complete"].includes(diagnostic.state)) {
+		if (diagnostic.state !== "active_verified_complete") {
 			return `BLOCK_ULTRAGOAL_COMPLETION: ${diagnostic.message} Use durable blocker work or run strict \`gjc ultragoal checkpoint --status complete --quality-gate-json <file> --gjc-goal-json <file>\` before completion.`;
 		}
 	}
