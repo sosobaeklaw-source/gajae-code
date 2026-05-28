@@ -36,6 +36,9 @@ export class LoginDialogComponent extends Container {
 		// Dynamic content area
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
+		this.#contentContainer.addChild(new Spacer(1));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", "Preparing sign-in…"), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", "Esc: cancel"), 1, 0));
 
 		// Input (always present, used when needed)
 		this.#input = new Input();

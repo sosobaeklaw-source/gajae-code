@@ -931,7 +931,7 @@ export class SelectorController {
 				return;
 			}
 			if (mode === "login") {
-				await this.#handleOAuthLogin(providerId);
+				void this.#handleOAuthLogin(providerId);
 			} else {
 				await this.#handleOAuthLogout(providerId);
 			}
@@ -955,13 +955,13 @@ export class SelectorController {
 			selector = new OAuthSelectorComponent(
 				mode,
 				this.ctx.session.modelRegistry.authStorage,
-				async (selectedProviderId: string) => {
+				(selectedProviderId: string) => {
 					selector.stopValidation();
 					done();
 					if (mode === "login") {
-						await this.#handleOAuthLogin(selectedProviderId);
+						void this.#handleOAuthLogin(selectedProviderId);
 					} else {
-						await this.#handleOAuthLogout(selectedProviderId);
+						void this.#handleOAuthLogout(selectedProviderId);
 					}
 				},
 				() => {
