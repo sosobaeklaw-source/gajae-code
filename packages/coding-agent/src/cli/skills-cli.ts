@@ -1,7 +1,11 @@
 /**
  * Handles `gjc skills` for inspecting bundled workflow skill definitions.
  */
-import { DEFAULT_GJC_DEFINITION_NAMES, getEmbeddedDefaultGjcSkills } from "../defaults/gjc-defaults";
+import {
+	DEFAULT_GJC_DEFINITION_NAMES,
+	type EmbeddedDefaultGjcSkill,
+	getEmbeddedDefaultGjcSkills,
+} from "../defaults/gjc-defaults";
 
 export type SkillsAction = "list" | "read";
 
@@ -24,7 +28,7 @@ interface SkillsReadEntry extends SkillsListEntry {
 	content: string;
 }
 
-function getEmbeddedSkill(name: string): ReturnType<typeof getEmbeddedDefaultGjcSkills>[number] | undefined {
+function getEmbeddedSkill(name: string): EmbeddedDefaultGjcSkill | undefined {
 	return getEmbeddedDefaultGjcSkills().find(skill => skill.name === name);
 }
 
