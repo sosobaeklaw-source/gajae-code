@@ -1,4 +1,5 @@
 import type { SkillActiveEntry, WorkflowHudChip } from "../../../skill-state/active-state";
+import { workflowReceiptStatus } from "../../../skill-state/workflow-state-contract";
 
 const ANSI_RESET_FG = "\x1b[39m";
 const ANSI_RESET_BOLD = "\x1b[22m";
@@ -60,6 +61,9 @@ function formatEntry(entry: SkillActiveEntry): string {
 		.map(formatChip)
 		.filter((chip): chip is string => Boolean(chip));
 	if (entry.stale === true) chips.unshift("warn:stale");
+	const receiptStatus = workflowReceiptStatus(entry.receipt);
+	if (receiptStatus === "stale") chips.unshift("warn:receipt=stale");
+	if (receiptStatus === "fresh") chips.push("receipt=fresh");
 	const summary = sanitizeHudPart(entry.hud?.summary);
 	return [base, summary, ...chips].filter(Boolean).join(" ");
 }

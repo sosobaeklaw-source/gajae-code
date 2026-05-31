@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { WorkflowStateReceipt } from "./workflow-state-contract";
 
 export const SKILL_ACTIVE_STATE_FILE = "skill-active-state.json";
 export const SKILL_ACTIVE_STALE_MS = 24 * 60 * 60 * 1000;
@@ -25,6 +26,8 @@ export interface WorkflowHudSummary {
 	updated_at?: string;
 }
 
+export type { WorkflowStateReceipt } from "./workflow-state-contract";
+
 export interface SkillActiveEntry {
 	skill: string;
 	phase?: string;
@@ -36,6 +39,7 @@ export interface SkillActiveEntry {
 	turn_id?: string;
 	hud?: WorkflowHudSummary;
 	stale?: boolean;
+	receipt?: WorkflowStateReceipt;
 }
 
 export interface SkillActiveState {
@@ -70,6 +74,7 @@ export interface SyncSkillActiveStateOptions {
 	nowIso?: string;
 	source?: string;
 	hud?: WorkflowHudSummary;
+	receipt?: WorkflowStateReceipt;
 }
 
 const HUD_TEXT_LIMIT = 80;
@@ -142,6 +147,36 @@ export function normalizeWorkflowHudSummary(raw: unknown): WorkflowHudSummary | 
 	};
 }
 
+function normalizeWorkflowStateReceipt(raw: unknown): WorkflowStateReceipt | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const record = raw as Record<string, unknown>;
+	if (record.version !== 1) return undefined;
+	const skill = safeString(record.skill).trim();
+	if (!isCanonicalGjcWorkflowSkill(skill)) return undefined;
+	const owner = safeString(record.owner).trim();
+	if (owner !== "gjc-state-cli" && owner !== "gjc-runtime" && owner !== "gjc-hook") return undefined;
+	const command = sanitizeHudString(record.command, 120);
+	const statePath = sanitizeHudString(record.state_path, 240);
+	const storagePath = sanitizeHudString(record.storage_path, 240);
+	const mutatedAt = sanitizeHudString(record.mutated_at, 40);
+	const freshUntil = sanitizeHudString(record.fresh_until, 40);
+	const status = safeString(record.status).trim();
+	const mutationId = sanitizeHudString(record.mutation_id, 120);
+	if (!command || !statePath || !storagePath || !mutatedAt || !freshUntil || !mutationId) return undefined;
+	return {
+		version: 1,
+		skill,
+		owner,
+		command,
+		state_path: statePath,
+		storage_path: storagePath,
+		mutated_at: mutatedAt,
+		fresh_until: freshUntil,
+		status: status === "stale" ? "stale" : "fresh",
+		mutation_id: mutationId,
+	};
+}
+
 function encodePathSegment(value: string): string {
 	return encodeURIComponent(value).replaceAll(".", "%2E");
 }
@@ -175,6 +210,7 @@ function normalizeEntry(raw: unknown): SkillActiveEntry | null {
 	const skill = safeString(record.skill).trim();
 	if (!skill) return null;
 	const hud = normalizeWorkflowHudSummary(record.hud);
+	const receipt = normalizeWorkflowStateReceipt(record.receipt);
 	return {
 		...record,
 		skill,
@@ -186,6 +222,7 @@ function normalizeEntry(raw: unknown): SkillActiveEntry | null {
 		thread_id: safeString(record.thread_id).trim() || undefined,
 		turn_id: safeString(record.turn_id).trim() || undefined,
 		...(hud ? { hud } : {}),
+		...(receipt ? { receipt } : {}),
 		stale: undefined,
 	};
 }
@@ -338,6 +375,7 @@ export async function syncSkillActiveState(options: SyncSkillActiveStateOptions)
 		thread_id: options.threadId,
 		turn_id: options.turnId,
 		...(hud ? { hud } : {}),
+		...(options.receipt ? { receipt: options.receipt } : {}),
 	};
 	const { rootPath, sessionPath } = getSkillActiveStatePaths(options.cwd, options.sessionId);
 	const rootState = (await readStateFile(rootPath)) ?? { version: 1, active_skills: [] };
