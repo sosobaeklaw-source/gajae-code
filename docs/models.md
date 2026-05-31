@@ -76,13 +76,6 @@ providers:
         maxTokens: 16384
         headers:
           X-Model: value
-        wireModelId: upstream-model-id
-        requestTransform:
-          profile: openai-proxy
-          setHeaders:
-            X-Proxy-Route: default
-          extraBody:
-            gateway: default
         thinking:
           minLevel: low
           maxLevel: xhigh
@@ -114,34 +107,101 @@ modelBindings:
 - `openai-responses`
 - `openai-codex-responses`
 - `azure-openai-responses`
+- `bedrock-converse-stream`
 - `anthropic-messages`
+- `bedrock-converse-stream`
 - `google-generative-ai`
 - `google-vertex`
+- `google-gemini-cli`
+- `ollama-chat`
+- `cursor-agent`
 
+
+### First-class Azure OpenAI and Amazon Bedrock examples
+
+Azure OpenAI uses canonical OpenAI model IDs in GJC and resolves those IDs to Azure deployment names at request time. Set `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` to avoid assuming model id equals deployment name:
+
+```yaml
+providers:
+  azure-openai:
+    baseUrl: https://my-resource.openai.azure.com/openai/v1
+    apiKeyEnv: AZURE_OPENAI_API_KEY
+    api: azure-openai-responses
+    models:
+      - id: gpt-4.1
+      - id: o3
+```
+
+```sh
+export AZURE_OPENAI_DEPLOYMENT_NAME_MAP='gpt-4.1=gpt-41-prod,o3=o3-reasoning-prod'
+```
+
+Amazon Bedrock uses the native `bedrock-converse-stream` transport and AWS credential chain auth. Do not put AWS access keys in `models.yml`; configure `AWS_REGION` / `AWS_PROFILE` or standard static AWS credential environment variables instead:
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com
+    api: bedrock-converse-stream
+    models:
+      - id: us.anthropic.claude-opus-4-6-v1
+      - id: anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
+### MiniMax and GLM custom provider examples
+
+MiniMax's OpenAI-compatible endpoint rejects multiple system messages and emits thinking in `reasoning_content`, so pin the public-safe compatibility fields when hand-authoring a custom provider:
+
+```yaml
+providers:
+  minimax-custom:
+    baseUrl: https://api.minimax.io/v1
+    apiKeyEnv: MINIMAX_API_KEY
+    api: openai-completions
+    compat:
+      supportsStore: false
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+      reasoningContentField: reasoning_content
+    models:
+      - id: MiniMax-M2.5
+```
+
+GLM via z.ai is available as the first-class `zai` provider. For a private GLM-compatible proxy, keep secrets in an env var and disable OpenAI-only request fields as needed:
+
+```yaml
+providers:
+  glm-proxy:
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+    apiKeyEnv: ZAI_API_KEY
+    api: openai-completions
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+    models:
+      - id: glm-4.6
+```
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
+- `models.yml` is strict: unknown provider/model keys fail validation before provider dispatch, so stale keys such as `requestTransform` or `wireModelId` only work where this document lists them.
 - `discovery.type`: `ollama`, `llama.cpp`, or `lm-studio`
 
-## OpenAI-compatible proxy request shaping
+## OpenAI-compatible proxy configuration
 
-OpenAI-compatible proxy providers can declare request shaping without hardcoding a provider name:
+OpenAI-compatible proxy providers should use schema-supported provider keys first:
 
 ```yaml
 providers:
   proxy-provider:
     baseUrl: https://api.proxy.example/v1
-    apiKey: PROXY_API_KEY
+    apiKeyEnv: PROXY_API_KEY
     api: openai-completions
-    requestTransform:
-      profile: openai-proxy
-      setHeaders:
-        X-Proxy-Route: default
-      extraBody:
-        gateway: default
+    auth: apiKey
+    headers:
+      User-Agent: curl/8.7.1
     models:
       - id: local-gpt
-        wireModelId: upstream/gpt-5.5
         name: Local GPT
         reasoning: true
         input: [text]
@@ -150,8 +210,13 @@ providers:
         maxTokens: 128000
 ```
 
-`requestTransform.profile: openai-proxy` strips OpenAI SDK/Stainless telemetry headers at final fetch time and sets a generic GJC user agent. Explicit config wins over the preset:
+Use provider-level `headers` for proxy-required headers. Keep the provider `api` set to `openai-completions` when the proxy exposes Chat Completions-compatible `/v1/chat/completions` semantics. `auth: apiKey` sends the resolved token as bearer auth; use `auth: none` only for trusted local/no-auth endpoints.
 
+`requestTransform` and `wireModelId` remain supported for request-body shaping, but they are not needed for ordinary OpenAI-compatible proxies whose local model id is already the upstream wire id. Unknown config keys fail validation before a provider request is sent.
+
+When request shaping is needed:
+
+- `requestTransform.profile: openai-proxy` strips OpenAI SDK/Stainless telemetry headers at final fetch time and sets a generic GJC user agent.
 - `stripHeaders` replaces the preset strip list when provided.
 - `setHeaders` is applied after stripping; use `null` to remove a header.
 - `extraBody` is shallow-merged into the JSON request body after provider compatibility fields; core transport keys such as `model`, `messages`/`input`, `stream`, `tools`, and `tool_choice` are protected and ignored.
@@ -164,13 +229,13 @@ providers:
 providers:
   layofflabs:
     baseUrl: https://api.layofflabs.com/v1
-    apiKeyEnv: LAYOFFLABS_API_KEY
+    apiKeyEnv: OPENAI_API_KEY
     api: openai-completions
-    requestTransform:
-      profile: openai-proxy
+    auth: apiKey
+    headers:
+      User-Agent: curl/8.7.1
     models:
       - id: gpt-5.5
-        wireModelId: gpt-5.5
         name: GPT 5.5 via Layofflabs
         reasoning: true
         thinking:
@@ -221,6 +286,7 @@ Must define at least one of:
 
 - `id` required
 - `contextWindow` and `maxTokens` must be positive if provided
+- unknown provider, model, override, and request-transform keys fail schema validation; remove stale keys instead of relying on them being ignored.
 
 ## Merge and override order
 

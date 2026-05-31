@@ -901,30 +901,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"loop.mode": {
-		type: "enum",
-		values: ["prompt", "compact", "reset"] as const,
-		default: "prompt",
-		ui: {
-			tab: "interaction",
-			label: "Loop Mode",
-			description: "What happens between /loop iterations before re-submitting the prompt",
-			options: [
-				{
-					value: "prompt",
-					label: "Prompt",
-					description: "Re-submit the prompt as a follow-up message (current behavior)",
-				},
-				{
-					value: "compact",
-					label: "Compact",
-					description: "Compact the session context, then re-submit the prompt",
-				},
-				{ value: "reset", label: "Reset", description: "Start a new session, then re-submit the prompt" },
-			],
-		},
-	},
-
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
@@ -2207,7 +2183,7 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			label: "Goal Status In Footer",
-			description: "Show token budget alongside the goal indicator in the status line",
+			description: "Show goal usage alongside the goal indicator in the status line",
 		},
 	},
 

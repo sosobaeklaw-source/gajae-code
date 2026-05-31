@@ -42,6 +42,18 @@ function formatTaskCounts(counts: Record<string, number>): string {
 		.join(" ");
 }
 
+function formatNotificationSummary(snapshot: GjcTeamSnapshot): string {
+	const summary = snapshot.notification_summary;
+	return `notifications: total=${summary.total} replay_eligible=${summary.replay_eligible} pending=${summary.by_state.pending} queued=${summary.by_state.queued} deferred=${summary.by_state.deferred} failed=${summary.by_state.failed}`;
+}
+
+function formatAwaitingIntegrationNextStep(snapshot: GjcTeamSnapshot): string[] {
+	if (snapshot.phase !== "awaiting_integration") return [];
+	return [
+		"next: worker tasks are completed, but integration still needs leader attention before the team is complete",
+	];
+}
+
 function formatIntegrationSummary(snapshot: {
 	integration_by_worker?: Record<string, { status?: string; conflict_files?: string[] }>;
 }): string[] {
@@ -64,7 +76,7 @@ function parseInputFlag(argv: string[]): Record<string, unknown> {
 }
 
 export default class Team extends Command {
-	static description = "Run native GJC tmux team orchestration commands";
+	static description = "Run native GJC tmux team orchestration; --dry-run writes ephemeral .gjc/state/team state only";
 	static strict = false;
 
 	static args = {
@@ -76,13 +88,18 @@ export default class Team extends Command {
 
 	static flags = {
 		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON", default: false }),
-		"dry-run": Flags.boolean({ description: "Create team state without starting tmux panes", default: false }),
+		"dry-run": Flags.boolean({
+			description:
+				"Create ephemeral .gjc/state/team state without starting tmux panes; do not commit generated state",
+			default: false,
+		}),
 	};
 
 	static examples = [
 		'gjc team 3:executor "Implement the approved plan"',
 		"gjc team status <team-name> --json",
 		'gjc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-1"}\' --json',
+		'gjc team 2:executor --dry-run --json "Preview state only"',
 		"gjc team shutdown <team-name>",
 	];
 
@@ -118,6 +135,8 @@ export default class Team extends Command {
 				`state: ${snapshot.state_dir}`,
 				`tasks: ${snapshot.task_total} (${formatTaskCounts(snapshot.task_counts)})`,
 				`workers: ${snapshot.workers.map(worker => `${worker.id}:${worker.status}`).join(" ")}`,
+				formatNotificationSummary(snapshot),
+				...formatAwaitingIntegrationNextStep(snapshot),
 				...formatIntegrationSummary(snapshot),
 			]);
 			return;
@@ -141,7 +160,7 @@ export default class Team extends Command {
 			if (!operation || operation === "--help" || operation === "help") {
 				writeText([
 					"Supported operations:",
-					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified",
+					"send-message broadcast mailbox-list mailbox-mark-delivered mailbox-mark-notified notification-list notification-read notification-replay notification-mark-pane-attempt worker-startup-ack",
 					"create-task read-task list-tasks update-task claim-task transition-task-status release-task-claim",
 					"read-config read-manifest read-worker-status read-worker-heartbeat update-worker-heartbeat write-worker-inbox write-worker-identity",
 					"append-event read-events await-event write-shutdown-request read-shutdown-ack read-monitor-snapshot write-monitor-snapshot read-task-approval write-task-approval",
@@ -176,6 +195,7 @@ export default class Team extends Command {
 			`tmux: ${snapshot.tmux_session}`,
 			`state: ${snapshot.state_dir}`,
 			`workers: ${snapshot.workers.length}`,
+			...(dryRun ? ["dry-run: wrote ephemeral .gjc/state/team state only; do not commit generated .gjc state"] : []),
 		]);
 	}
 }

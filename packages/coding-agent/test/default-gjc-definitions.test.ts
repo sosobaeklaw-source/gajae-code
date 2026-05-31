@@ -193,7 +193,7 @@ Project executor override body.
 		).text();
 
 		for (const content of [team, ultragoal]) {
-			expect(content).toContain("fresh `get_goal` snapshot");
+			expect(content).toContain('fresh `goal({"op":"get"})` snapshot');
 			expect(content).toContain("Workers must not run `gjc ultragoal checkpoint`");
 			expect(content).toContain("checkpoint authority stays with the leader");
 			expect(content).toContain("Ultragoal does not auto-launch Team");
@@ -211,7 +211,12 @@ Project executor override body.
 		}
 		expect(content).toContain("/skill:ralplan");
 		expect(content).toContain("/skill:team");
-		expect(content).toContain("private runtime bridge");
+		expect(content).toContain("`gjc ralplan` is a native CLI");
+		expect(content).toContain("Direct `.gjc/` file edits are forbidden");
+		expect(content).toContain("do not edit `.gjc/state` directly without force override");
+		expect(content).toContain("default `0.05`");
+		expect(content).not.toContain("default `0.2`");
+		expect(content).not.toContain("20%");
 
 		for (const forbidden of [
 			"AskUserQuestion",
@@ -225,6 +230,21 @@ Project executor override body.
 		]) {
 			expect(content).not.toContain(forbidden);
 		}
+	});
+
+	it("keeps bundled ralplan stage artifacts on CLI write path", () => {
+		const ralplan = getDefaultGjcDefinitions().find(definition => definition.name === "ralplan");
+		expect(ralplan).toBeDefined();
+		const content = ralplan?.content ?? "";
+
+		expect(content).toContain("gjc ralplan --write --stage <type> --stage_n <N> --artifact");
+		expect(content).toContain("--stage planner");
+		expect(content).toContain("--stage architect");
+		expect(content).toContain("--stage critic");
+		expect(content).toContain("do not directly edit `.gjc/plans`");
+		expect(content).toContain(
+			"Direct `write`, `edit`, or `ast_edit` calls against `.gjc/specs`, `.gjc/plans`, `.gjc/state`, or any other `.gjc/` path are forbidden",
+		);
 	});
 
 	it("installs bundled workflow skill definitions without overwriting local edits unless forced", async () => {

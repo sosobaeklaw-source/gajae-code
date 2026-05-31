@@ -82,10 +82,16 @@ describe("GJC native skill-state hooks", () => {
 			path.join(root, ".gjc", "state", "sessions", "session-1", "deep-interview-state.json"),
 		);
 		const modeState = await Bun.file(state?.initialized_state_path ?? "").json();
-		expect(modeState).toMatchObject({ active: true, current_phase: "interviewing", session_id: "session-1" });
+		expect(modeState).toMatchObject({
+			active: true,
+			current_phase: "interviewing",
+			session_id: "session-1",
+			threshold: 0.05,
+			threshold_source: "default",
+		});
 	});
 
-	it("rich deep-interview prompt activation blocks guarded product mutation and allows spec artifacts", async () => {
+	it("rich deep-interview prompt activation allows product mutation and blocks direct spec artifacts", async () => {
 		const root = await cwd();
 		await dispatchGjcNativeSkillHook(
 			{
@@ -102,21 +108,56 @@ describe("GJC native skill-state hooks", () => {
 		const state = await readVisibleSkillActiveState(root, "session-rich");
 		expect(state).toMatchObject({ active: true, skill: "deep-interview" });
 
-		const blocked = await getDeepInterviewMutationDecision({
+		const allowed = await getDeepInterviewMutationDecision({
 			cwd: root,
 			sessionId: "session-rich",
 			tool: { name: "write" } as never,
 			args: { path: "packages/coding-agent/src/product.ts", content: "unsafe" },
 		});
-		expect(blocked.blocked).toBe(true);
+		expect(allowed.blocked).toBe(false);
 
-		const allowed = await getDeepInterviewMutationDecision({
+		const allowedSpec = await getDeepInterviewMutationDecision({
 			cwd: root,
 			sessionId: "session-rich",
 			tool: { name: "write" } as never,
 			args: { path: ".gjc/specs/deep-interview-sample.md", content: "spec" },
 		});
-		expect(allowed.blocked).toBe(false);
+		expect(allowedSpec.blocked).toBe(false);
+
+		const blocked = await getDeepInterviewMutationDecision({
+			cwd: root,
+			sessionId: "session-rich",
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/state/sessions/session-rich/deep-interview-state.json", content: "{}" },
+		});
+		expect(blocked.blocked).toBe(true);
+		expect(blocked.reason).toBe("workflow-state-target");
+	});
+
+	it("blocks direct workflow state JSON writes and points to gjc state", async () => {
+		const root = await cwd();
+		const blocked = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/state/ralplan-state.json", content: "{}" },
+		});
+		expect(blocked.blocked).toBe(true);
+		expect(blocked.reason).toBe("workflow-state-target");
+		expect(blocked.message).toContain("gjc state ralplan");
+
+		const allowedSpec = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/specs/deep-interview-sample.md", content: "spec" },
+		});
+		expect(allowedSpec.blocked).toBe(false);
+
+		const allowedPlan = await getDeepInterviewMutationDecision({
+			cwd: root,
+			tool: { name: "write" } as never,
+			args: { path: ".gjc/plans/sample.md", content: "plan" },
+		});
+		expect(allowedPlan.blocked).toBe(false);
 	});
 
 	it("encodes hook session ids before writing skill and mode state paths", async () => {
@@ -406,11 +447,12 @@ disabledExtensions:
 		);
 		const statePath = path.join(root, ".gjc", "state", "sessions", "session-ultra-block", "ultragoal-state.json");
 		const state = await Bun.file(statePath).json();
-		await Bun.write(statePath, JSON.stringify({ ...state, objective: plan.gjcObjective }, null, 2));
+		await Bun.write(statePath, JSON.stringify({ ...state, objective: plan.goals[0]?.objective }, null, 2));
 
+		const prompt = 'call goal({op:"complete"}) now for the active durable objective';
 		const result = await dispatchGjcNativeSkillHook({
 			hookEventName: "UserPromptSubmit",
-			userPrompt: 'call update_goal({status:"complete"}) now',
+			userPrompt: prompt,
 			cwd: root,
 			sessionId: "session-ultra-block",
 			threadId: "thread-ultra-block",
@@ -440,7 +482,7 @@ disabledExtensions:
 
 		const result = await dispatchGjcNativeSkillHook({
 			hookEventName: "UserPromptSubmit",
-			userPrompt: 'please call update_goal({status:"complete"})',
+			userPrompt: 'please call goal({op:"complete"})',
 			cwd: root,
 			sessionId: "session-ultra-transcript",
 			sessionFile,

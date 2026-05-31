@@ -203,17 +203,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "loop",
-		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
-		inlineHint: "[count|duration]",
-		allowArgs: true,
-		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleLoopCommand(command.args);
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
 		name: "goal",
 		description: "Toggle goal mode (persistent autonomous objective for this session)",
 		subcommands: [
@@ -222,7 +211,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "pause", description: "Pause the current goal" },
 			{ name: "resume", description: "Resume a paused goal" },
 			{ name: "drop", description: "Drop the current goal" },
-			{ name: "budget", description: "Adjust the token budget", usage: "<N|off>" },
 		],
 		inlineHint: "[objective]",
 		allowArgs: true,
@@ -791,6 +779,30 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const customInstructions = command.args || undefined;
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleCompactCommand(customInstructions);
+		},
+	},
+	{
+		name: "contribute-pr",
+		aliases: ["contribution-prep"],
+		description: "Dump redacted session context and spawn a fresh contribute-pr worker",
+		inlineHint: "[focus instructions]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const result = await runtime.session.prepareContributionPrep({
+				customInstructions: command.args || undefined,
+				spawnWorker: true,
+			});
+			await runtime.output(
+				[
+					"Contribution prep artifacts written.",
+					`Manifest: ${result.manifestPath}`,
+					`Worker prompt: ${result.workerPromptPath}`,
+				].join("\n"),
+			);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleContributionPrepCommand(command.args || undefined);
 		},
 	},
 	{

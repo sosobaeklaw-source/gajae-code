@@ -5,14 +5,20 @@ import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/lo
 import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import { listActiveSkills, readVisibleSkillActiveState, type SkillActiveEntry } from "./active-state";
+import {
+	type CanonicalGjcWorkflowSkill,
+	sanctionedWorkflowStateCommand,
+	workflowModeStateFileName,
+} from "./workflow-state-contract";
 
 export const DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE =
-	"Deep-interview is active; either continue interviewing with `ask`, or write/finalize the pending spec under `.gjc/specs/` / update state under `.gjc/state/`. Do not edit product code until explicit execution approval.";
+	"Deep-interview is active; continue interviewing with `ask`, write/finalize pending specs through the required GJC workflow CLI, or use an explicit force override. Direct `.gjc/` and product-code edits are blocked until explicit execution approval.";
+export const WORKFLOW_STATE_MUTATION_BLOCK_MESSAGE =
+	"Workflow state JSON is runtime-owned. Use `gjc state <skill> read|write --input '<json>'` for deep-interview, ralplan, ultragoal, and team. Planning artifacts under `.gjc/specs/` and `.gjc/plans/` remain allowed.";
 
 const BLOCKED_TOOL_NAMES = new Set(["edit", "write", "ast_edit"]);
 const ARCHIVE_OR_SQLITE_BASE_RE = /^(.+?\.(?:tar\.gz|sqlite3|sqlite|db3|zip|tgz|tar|db))(?:$|:)/i;
 const INTERNAL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
-const GLOB_META_RE = /[*?[\]{}]/;
 const VIM_FILE_SWITCH_RE = /^\s*:(?:e|e!|edit|edit!)(?:\s+([^<\r\n]+))?(?:<CR>|\r|\n|$)/i;
 
 type ToolWithEditMode = AgentTool & {
@@ -26,6 +32,8 @@ export interface DeepInterviewMutationGuardInput {
 	threadId?: string;
 	tool: ToolWithEditMode;
 	args: unknown;
+	forceOverride?: boolean;
+	enforceWorkflowState?: boolean;
 }
 
 interface ExtractedTargets {
@@ -38,6 +46,7 @@ export interface DeepInterviewMutationDecision {
 	message?: string;
 	targets: string[];
 	reason?: string;
+	command?: string;
 }
 
 interface ModeState {
@@ -246,34 +255,67 @@ function resolveRawPath(cwd: string, rawPath: string): { absolutePath?: string; 
 	}
 }
 
-function isAllowlistedPath(cwd: string, rawPath: string): boolean {
+function relativeGjcSegments(cwd: string, rawPath: string): string[] | null {
 	const { absolutePath, unknown } = resolveRawPath(cwd, rawPath);
-	if (unknown || !absolutePath) return false;
+	if (unknown || !absolutePath) return null;
 	const relative = path.relative(path.resolve(cwd), path.resolve(absolutePath));
-	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return false;
-	const segments = normalizePosix(relative).split("/").filter(Boolean);
-	return segments[0] === ".gjc" && (segments[1] === "specs" || segments[1] === "state");
+	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+	return normalizePosix(relative).split("/").filter(Boolean);
+}
+
+function blockedWorkflowStateSkill(cwd: string, rawPath: string): CanonicalGjcWorkflowSkill | null {
+	const segments = relativeGjcSegments(cwd, rawPath);
+	if (!segments || segments[0] !== ".gjc") return null;
+	if (segments[1] === "specs" || segments[1] === "plans") return null;
+	if (segments[1] !== "state") return null;
+	const fileName = segments.at(-1) ?? "";
+	for (const skillName of ["deep-interview", "ralplan", "ultragoal", "team"] as const) {
+		if (fileName === workflowModeStateFileName(skillName)) return skillName;
+	}
+	if (fileName === "skill-active-state.json") return "deep-interview";
+	return null;
+}
+
+function firstBlockedWorkflowStateSkill(cwd: string, targets: ExtractedTargets): CanonicalGjcWorkflowSkill | null {
+	for (const rawPath of targets.paths) {
+		const skill = blockedWorkflowStateSkill(cwd, rawPath);
+		if (skill) return skill;
+	}
+	return null;
+}
+
+function isGjcManagedPath(cwd: string, rawPath: string): boolean {
+	const segments = relativeGjcSegments(cwd, rawPath);
+	return segments?.[0] === ".gjc";
+}
+
+function isAllowlistedPath(cwd: string, rawPath: string): boolean {
+	const segments = relativeGjcSegments(cwd, rawPath);
+	if (!segments || segments[0] !== ".gjc") return false;
+	return segments[1] === "specs" || segments[1] === "plans";
+}
+
+function hasGjcManagedTarget(cwd: string, targets: ExtractedTargets): boolean {
+	if (targets.unknown || targets.paths.length === 0) return false;
+	return targets.paths.some(rawPath => isGjcManagedPath(cwd, rawPath));
 }
 
 function allTargetsAllowlisted(cwd: string, targets: ExtractedTargets): boolean {
-	if (targets.unknown || targets.paths.length === 0) return false;
-	return targets.paths.every(rawPath => {
-		if (GLOB_META_RE.test(rawPath)) {
-			return isAllowlistedPath(cwd, rawPath);
-		}
-		return isAllowlistedPath(cwd, rawPath);
-	});
+	return (
+		!targets.unknown && targets.paths.length > 0 && targets.paths.every(rawPath => isAllowlistedPath(cwd, rawPath))
+	);
 }
-
 export async function assertDeepInterviewMutationRawPathsAllowed(input: {
 	cwd: string;
 	sessionId?: string;
 	threadId?: string;
 	rawPaths: string[];
+	forceOverride?: boolean;
 }): Promise<void> {
+	if (input.forceOverride) return;
 	if (!(await isActiveDeepInterview(input.cwd, input.sessionId, input.threadId))) return;
 	const targets: ExtractedTargets = { paths: input.rawPaths, unknown: input.rawPaths.length === 0 };
-	if (!allTargetsAllowlisted(input.cwd, targets)) {
+	if (hasGjcManagedTarget(input.cwd, targets)) {
 		throw new ToolError(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
 	}
 }
@@ -282,19 +324,41 @@ export async function getDeepInterviewMutationDecision(
 	input: DeepInterviewMutationGuardInput,
 ): Promise<DeepInterviewMutationDecision> {
 	if (!BLOCKED_TOOL_NAMES.has(input.tool.name)) return { blocked: false, targets: [] };
+	const targets = extractTargets(input.tool, input.args);
+	if (input.enforceWorkflowState !== false) {
+		const stateSkill = firstBlockedWorkflowStateSkill(input.cwd, targets);
+		if (stateSkill) {
+			const command = sanctionedWorkflowStateCommand(stateSkill);
+			return {
+				blocked: true,
+				message: `${WORKFLOW_STATE_MUTATION_BLOCK_MESSAGE}\nUse: ${command}`,
+				targets: targets.paths,
+				reason: "workflow-state-target",
+				command,
+			};
+		}
+	}
 	if (!(await isActiveDeepInterview(input.cwd, input.sessionId, input.threadId))) {
 		return { blocked: false, targets: [] };
 	}
-	const targets = extractTargets(input.tool, input.args);
-	if (allTargetsAllowlisted(input.cwd, targets)) {
-		return { blocked: false, targets: targets.paths };
+	if (input.forceOverride) return { blocked: false, targets: [] };
+	if (targets.unknown) {
+		return {
+			blocked: true,
+			message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
+			targets: targets.paths,
+			reason: "unknown-target",
+		};
 	}
-	return {
-		blocked: true,
-		message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
-		targets: targets.paths,
-		reason: targets.unknown ? "unknown-target" : "product-target",
-	};
+	if (hasGjcManagedTarget(input.cwd, targets) && !allTargetsAllowlisted(input.cwd, targets)) {
+		return {
+			blocked: true,
+			message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
+			targets: targets.paths,
+			reason: "gjc-managed-target",
+		};
+	}
+	return { blocked: false, targets: targets.paths };
 }
 
 export async function assertDeepInterviewMutationAllowed(input: DeepInterviewMutationGuardInput): Promise<void> {

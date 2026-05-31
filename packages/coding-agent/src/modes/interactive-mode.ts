@@ -30,6 +30,7 @@ import { APP_NAME, adjustHsv, getProjectDir, hsvToRgb, isEnoent, logger, postmor
 import chalk from "chalk";
 import { KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, type Settings, settings } from "../config/settings";
+import { DEFAULT_GJC_DEFINITION_NAMES } from "../defaults/gjc-defaults";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -40,7 +41,7 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import { resolveSkillSlashCommands, type Skill } from "../extensibility/skills";
 import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
 import { consumePendingGoalModeRequest } from "../gjc-runtime/goal-mode-request";
-import type { Goal, GoalModeState } from "../goals/state";
+import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import {
@@ -87,15 +88,6 @@ import { InputController } from "./controllers/input-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import {
-	consumeLoopLimitIteration,
-	createLoopLimitRuntime,
-	describeLoopLimit,
-	describeLoopLimitRuntime,
-	isLoopDurationExpired,
-	type LoopLimitRuntime,
-	parseLoopLimitArgs,
-} from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { interruptHint } from "./shared";
@@ -191,9 +183,9 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop";
 
-const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
+const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop"]);
 
 function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
 	const trimmed = args.trim();
@@ -251,10 +243,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	goalModeEnabled = false;
 	goalModePaused = false;
 	planModePlanFilePath: string | undefined = undefined;
-	loopModeEnabled = false;
-	loopPrompt: string | undefined = undefined;
-	loopLimit: LoopLimitRuntime | undefined = undefined;
-	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	pendingImages: ImageContent[] = [];
@@ -623,7 +611,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		for (const command of resolvedCommands) {
 			this.skillCommands.set(command.name, command.skill);
 		}
-		return resolvedCommands.map(command => ({ name: command.name, description: command.description }));
+		const defaultGjcNames = new Set<string>(DEFAULT_GJC_DEFINITION_NAMES);
+		return resolvedCommands.map(command => ({
+			name: command.name,
+			description: command.description,
+			// Pin the bundled GJC workflow skills above generic commands in autocomplete.
+			...(defaultGjcNames.has(command.skill.name) ? { priority: 100 } : {}),
+		}));
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
@@ -635,40 +629,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.onInputCallback = undefined;
 			resolve(input);
 		};
-		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 		return promise;
 	}
 
-	#scheduleLoopAutoSubmit(): void {
-		this.#cancelLoopAutoSubmit();
-		if (!this.loopModeEnabled || !this.loopPrompt) return;
-		const prompt = this.loopPrompt;
-		const loopAction = settings.get("loop.mode");
-		this.#deferLoopAutoSubmit(() => {
-			void this.#runLoopIteration(loopAction, prompt);
-		});
-	}
-
-	#deferLoopAutoSubmit(callback: () => void): void {
-		// Brief delay so the user has a chance to press Esc between iterations.
-		this.#loopAutoSubmitTimer = setTimeout(() => {
-			this.#loopAutoSubmitTimer = undefined;
-			if (!this.loopModeEnabled || !this.onInputCallback) return;
-			callback();
-		}, 800);
-	}
-
-	#cancelLoopAutoSubmit(): void {
-		if (this.#loopAutoSubmitTimer) {
-			clearTimeout(this.#loopAutoSubmitTimer);
-			this.#loopAutoSubmitTimer = undefined;
-		}
-	}
-
 	#scheduleGoalContinuation(): void {
 		this.#cancelGoalContinuation();
-		if (this.loopModeEnabled) return;
 		if (!this.onInputCallback) return;
 		if (!this.session.settings.get("goal.continuationModes").includes("interactive")) return;
 		if (this.planModeEnabled || this.planModePaused) return;
@@ -706,92 +672,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#goalContinuationTimer);
 			this.#goalContinuationTimer = undefined;
 		}
-	}
-
-	#isLoopAutoSubmitBlocked(): boolean {
-		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
-	}
-
-	#submitLoopPromptWhenReady(prompt: string): void {
-		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (isLoopDurationExpired(this.loopLimit)) {
-			this.disableLoopMode("Loop time limit reached. Loop mode disabled.");
-			return;
-		}
-		if (this.#isLoopAutoSubmitBlocked()) {
-			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
-			return;
-		}
-		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
-	}
-
-	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
-		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (this.#isLoopAutoSubmitBlocked()) {
-			this.#deferLoopAutoSubmit(() => {
-				void this.#runLoopIteration(action, prompt);
-			});
-			return;
-		}
-
-		if (!consumeLoopLimitIteration(this.loopLimit)) {
-			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
-			return;
-		}
-
-		if (action === "compact") {
-			await this.handleCompactCommand();
-		} else if (action === "reset") {
-			await this.handleClearCommand();
-		}
-		this.#submitLoopPromptWhenReady(prompt);
-	}
-
-	disableLoopMode(message = "Loop mode disabled."): void {
-		const wasEnabled = this.loopModeEnabled;
-		this.loopModeEnabled = false;
-		this.loopPrompt = undefined;
-		this.loopLimit = undefined;
-		this.#cancelLoopAutoSubmit();
-		this.statusLine.setLoopModeStatus(undefined);
-		this.updateEditorChrome();
-		this.ui.requestRender();
-		if (wasEnabled) {
-			this.showStatus(message);
-		}
-	}
-
-	/**
-	 * Pause the loop without exiting it: drops the captured prompt and any
-	 * pending auto-resubmit. Loop mode stays enabled — the next prompt the
-	 * user submits becomes the new loop prompt and resumes iteration.
-	 */
-	pauseLoop(): void {
-		this.loopPrompt = undefined;
-		this.#cancelLoopAutoSubmit();
-	}
-
-	async handleLoopCommand(args = ""): Promise<void> {
-		if (this.loopModeEnabled) {
-			this.disableLoopMode();
-			return;
-		}
-		const parsedLimit = parseLoopLimitArgs(args);
-		if (typeof parsedLimit === "string") {
-			this.showError(parsedLimit);
-			return;
-		}
-		this.loopModeEnabled = true;
-		this.loopPrompt = undefined;
-		this.loopLimit = createLoopLimitRuntime(parsedLimit);
-		this.statusLine.setLoopModeStatus({ enabled: true });
-		this.updateEditorChrome();
-		this.ui.requestRender();
-		const limitSuffix = parsedLimit ? ` Limited to ${describeLoopLimit(parsedLimit)}.` : "";
-		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
-		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix} Your next prompt will repeat after each turn. Esc cancels the current iteration; /loop again to disable.`,
-		);
 	}
 
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
@@ -1088,30 +968,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
-		const goal = modeData?.goal;
-		if (!goal || typeof goal !== "object") return undefined;
-		const value = goal as Record<string, unknown>;
-		if (
-			typeof value.id !== "string" ||
-			typeof value.objective !== "string" ||
-			typeof value.status !== "string" ||
-			typeof value.tokensUsed !== "number" ||
-			typeof value.timeUsedSeconds !== "number" ||
-			typeof value.createdAt !== "number" ||
-			typeof value.updatedAt !== "number"
-		) {
-			return undefined;
-		}
-		return {
-			id: value.id,
-			objective: value.objective,
-			status: value.status as Goal["status"],
-			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
-			tokensUsed: value.tokensUsed,
-			timeUsedSeconds: value.timeUsedSeconds,
-			createdAt: value.createdAt,
-			updatedAt: value.updatedAt,
-		};
+		return normalizeGoal(modeData?.goal) ?? undefined;
 	}
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
@@ -1434,7 +1291,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.appendCustomEntry("goal-completed", {
 				objective: currentState?.goal?.objective,
 				tokensUsed: currentState?.goal?.tokensUsed,
-				tokenBudget: currentState?.goal?.tokenBudget,
 				timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
 			});
 		}
@@ -1702,32 +1558,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
-		const state = this.session.getGoalModeState();
-		if (!this.goalModeEnabled || !state?.enabled) {
-			this.showWarning("No active goal.");
-			return;
-		}
-		if (state.goal.status === "complete") {
-			this.showStatus("Goal is already complete.");
-			return;
-		}
-		const trimmed = rawBudget.trim().toLowerCase();
-		let nextBudget: number | undefined;
-		if (trimmed !== "off") {
-			const parsed = Number.parseInt(trimmed, 10);
-			if (!Number.isInteger(parsed) || parsed <= 0) {
-				this.showError("Goal budget must be a positive integer or `off`.");
-				return;
-			}
-			nextBudget = parsed;
-		}
-		await this.session.goalRuntime.onBudgetMutated(nextBudget);
-		this.#resetGoalContinuationSuppression();
-		this.#scheduleGoalContinuation();
-		this.showStatus(nextBudget === undefined ? "Goal budget cleared." : `Goal budget set to ${nextBudget}.`);
-	}
-
 	async handleGoalModeCommand(rest?: string): Promise<void> {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
@@ -1791,19 +1621,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "drop":
 				await this.#confirmAndDropGoal();
 				return;
-			case "budget":
-				if (!this.goalModeEnabled) {
-					this.showWarning(
-						this.#getPausedGoalState() ? "Resume the goal before adjusting the budget." : "No active goal.",
-					);
-					return;
-				}
-				if (!rest) {
-					await this.#promptGoalBudgetEdit();
-					return;
-				}
-				await this.#handleGoalBudgetCommand(rest);
-				return;
 		}
 	}
 
@@ -1812,18 +1629,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!goal) return;
 		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
-		const items =
-			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
-				: ["Resume", "Show details", "Adjust budget…", "Drop"];
+		const items = state === "active" ? ["Show details", "Pause", "Drop"] : ["Resume", "Show details", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
 		switch (choice) {
 			case "Show details":
 				this.#showGoalDetails();
-				return;
-			case "Adjust budget…":
-				await this.#promptGoalBudgetEdit();
 				return;
 			case "Pause":
 				await this.#pauseGoalAction();
@@ -1845,29 +1656,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		const used = goal.tokensUsed.toLocaleString();
-		const budgetLine =
-			goal.tokenBudget !== undefined
-				? `${used} / ${goal.tokenBudget.toLocaleString()} (${Math.max(0, goal.tokenBudget - goal.tokensUsed).toLocaleString()} left)`
-				: `${used} (no budget)`;
 		const lines = [
 			`Objective: ${goal.objective}`,
 			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
-			`Tokens: ${budgetLine}`,
+			`Tokens used: ${used}`,
 			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
 		];
 		this.showStatus(lines.join("\n"));
-	}
-
-	async #promptGoalBudgetEdit(): Promise<void> {
-		const goal = this.session.getGoalModeState()?.goal;
-		const prefill = goal?.tokenBudget !== undefined ? String(goal.tokenBudget) : "";
-		const input = (
-			await this.showHookEditor("Goal budget (number, `off`, or empty to cancel)", prefill, undefined, {
-				promptStyle: true,
-			})
-		)?.trim();
-		if (!input) return;
-		await this.#handleGoalBudgetCommand(input);
 	}
 
 	async #pauseGoalAction(): Promise<void> {
@@ -2522,6 +2317,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {
 		return this.#commandController.handleHandoffCommand(customInstructions);
+	}
+
+	handleContributionPrepCommand(customInstructions?: string): Promise<void> {
+		return this.#commandController.handleContributionPrepCommand(customInstructions);
 	}
 
 	executeCompaction(

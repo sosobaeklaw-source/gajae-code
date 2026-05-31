@@ -110,10 +110,9 @@ const modelSegment: StatusLineSegment = {
 	},
 };
 
-function formatGoalBudget(current: number, budget?: number): string {
+function formatGoalUsage(current: number): string {
 	const used = formatNumber(current);
-	if (budget === undefined) return used;
-	return `${used}/${formatNumber(budget)}`;
+	return used;
 }
 
 function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: boolean }): RenderedSegment {
@@ -131,10 +130,6 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 			icon = theme.symbol("status.success");
 			color = "success";
 			break;
-		case "budget-limited":
-			icon = theme.symbol("status.warning");
-			color = "warning";
-			break;
 		case "dropped":
 			icon = theme.symbol("status.aborted");
 			color = "dim";
@@ -144,9 +139,9 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	}
 
 	const parts: string[] = [withIcon(icon, "Goal")];
-	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
-	if (showBudget && goal) {
-		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
+	const showUsage = ctx.session.settings.get("goal.statusInFooter") === true;
+	if (showUsage && goal) {
+		parts.push(formatGoalUsage(goal.tokensUsed));
 	}
 	return { content: theme.fg(color, parts.join(" ")), visible: true };
 }
@@ -167,12 +162,6 @@ const modeSegment: StatusLineSegment = {
 		const goal = ctx.goalMode;
 		if (goal && (goal.enabled || goal.paused)) {
 			return renderGoalMode(ctx, goal);
-		}
-
-		const loop = ctx.loopMode;
-		if (loop?.enabled) {
-			const content = withIcon(theme.icon.loop, "Loop");
-			return { content: theme.fg("customMessageLabel", content), visible: true };
 		}
 
 		return { content: "", visible: false };

@@ -1,6 +1,12 @@
 import type { WorkflowHudChip, WorkflowHudSummary } from "./active-state";
 
-interface DeepInterviewHudState {
+interface WorkflowGateHudState {
+	approvalStatus?: string;
+	blockedReason?: string;
+	nextAction?: string;
+}
+
+interface DeepInterviewHudState extends WorkflowGateHudState {
 	phase?: string;
 	ambiguity?: number;
 	threshold?: number;
@@ -11,7 +17,7 @@ interface DeepInterviewHudState {
 	updatedAt?: string;
 }
 
-interface RalplanHudState {
+interface RalplanHudState extends WorkflowGateHudState {
 	stage?: string;
 	waiting?: string;
 	iteration?: number;
@@ -27,7 +33,7 @@ interface UltragoalLikeGoal {
 	status: string;
 }
 
-interface UltragoalHudState {
+interface UltragoalHudState extends WorkflowGateHudState {
 	status: string;
 	currentGoal?: UltragoalLikeGoal;
 	counts: Record<string, number>;
@@ -41,7 +47,7 @@ interface TeamHudWorker {
 	status?: string;
 }
 
-interface TeamHudState {
+interface TeamHudState extends WorkflowGateHudState {
 	phase: string;
 	task_total: number;
 	task_counts: Record<string, number>;
@@ -66,6 +72,14 @@ function chip(
 	return { label, value, priority, ...(severity ? { severity } : {}) };
 }
 
+function gateChips(state: WorkflowGateHudState, gatePriority: number): Array<WorkflowHudChip | null> {
+	return [
+		chip("gate", state.approvalStatus, gatePriority, state.approvalStatus === "approved" ? "success" : "warning"),
+		chip("blocked", state.blockedReason, gatePriority + 10, "blocked"),
+		chip("next", state.nextAction, gatePriority + 20),
+	];
+}
+
 function compactChips(chips: Array<WorkflowHudChip | null>): WorkflowHudChip[] {
 	return chips.filter((item): item is WorkflowHudChip => item !== null);
 }
@@ -74,6 +88,7 @@ export function buildDeepInterviewHudSummary(state: DeepInterviewHudState): Work
 	return {
 		version: 1,
 		chips: compactChips([
+			...gateChips(state, 5),
 			chip("phase", state.phase, 10),
 			chip("ambiguity", [percent(state.ambiguity), percent(state.threshold)].filter(Boolean).join("/"), 20),
 			chip("round", state.roundCount === undefined ? undefined : String(state.roundCount), 30),
@@ -100,6 +115,7 @@ export function buildRalplanHudSummary(state: RalplanHudState): WorkflowHudSumma
 		summary: state.latestSummary,
 		chips: compactChips([
 			state.pendingApproval ? { label: "pending", value: "approval", priority: 5, severity: "warning" } : null,
+			...gateChips(state, 6),
 			chip("stage", state.stage, 10),
 			chip("waiting", state.waiting, 20),
 			chip("iter", state.iteration === undefined ? undefined : String(state.iteration), 30),
@@ -120,6 +136,7 @@ export function buildUltragoalHudSummary(state: UltragoalHudState): WorkflowHudS
 			chip("goals", `${complete}/${total}`, 10),
 			chip("current", state.currentGoal ? `${state.currentGoal.id}:${state.currentGoal.title}` : state.status, 20),
 			chip("status", state.status, 30, state.status === "complete" ? "success" : undefined),
+			...gateChips(state, 40),
 		]),
 		details: state.latestLedgerEvent
 			? compactChips([
@@ -153,7 +170,8 @@ export function buildTeamHudSummary(state: TeamHudState): WorkflowHudSummary {
 			chip("phase", state.phase, 10),
 			chip("workers", `${state.workers.length - failedWorkers}/${state.workers.length}`, 20),
 			chip("tasks", `${completed}/${state.task_total}`, 30),
-			chip("latest", latest, 50),
+			...gateChips(state, 40),
+			chip("latest", latest, 70),
 		]),
 		...(state.updated_at ? { updated_at: state.updated_at } : {}),
 	};

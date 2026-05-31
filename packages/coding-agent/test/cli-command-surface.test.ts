@@ -10,7 +10,7 @@ const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts"
 function extractRegisteredCommands(source: string): string[] {
 	const commandsBlock = source.match(/const commands: CommandEntry\[\] = \[([\s\S]*?)\];/);
 	if (!commandsBlock) return [];
-	return [...commandsBlock[1].matchAll(/\{ name: "([^"]+)"/g)].map(match => match[1]);
+	return [...commandsBlock[1].matchAll(/\bname:\s*"([^"]+)"/g)].map(match => match[1]);
 }
 
 describe("GJC public CLI command surface", () => {
@@ -18,16 +18,46 @@ describe("GJC public CLI command surface", () => {
 		const source = await Bun.file(cliEntry).text();
 		expect(extractRegisteredCommands(source)).toEqual([
 			"codex-native-hook",
-			"question",
 			"state",
 			"setup",
 			"skills",
+			"session",
 			"team",
 			"ultragoal",
 			"ralplan",
+			"contribute-pr",
 			"deep-interview",
 			"launch",
 		]);
+	});
+
+	it("documents the native CLI surface in command help", async () => {
+		for (const command of ["ralplan", "deep-interview", "state"]) {
+			const result = Bun.spawnSync(["bun", cliEntry, command, "--help"], {
+				cwd: repoRoot,
+				stderr: "pipe",
+				stdout: "pipe",
+			});
+			const output = `${result.stdout.toString()}\n${result.stderr.toString()}`;
+
+			expect(result.exitCode, output).toBe(0);
+			expect(output).not.toContain("GJC_RUNTIME_BINARY");
+			expect(output).not.toContain("private runtime");
+		}
+	});
+
+	it("documents team dry-run state behavior in command help", async () => {
+		const result = Bun.spawnSync(["bun", cliEntry, "team", "--help"], {
+			cwd: repoRoot,
+			stderr: "pipe",
+			stdout: "pipe",
+		});
+		const output = `${result.stdout.toString()}\n${result.stderr.toString()}`;
+
+		expect(result.exitCode, output).toBe(0);
+		expect(output).toContain("--dry-run");
+		expect(output).toContain(".gjc/state/team");
+		expect(output).toContain("do not commit");
 	});
 
 	it("does not capture absolute-path prompts as startup slash commands", () => {
