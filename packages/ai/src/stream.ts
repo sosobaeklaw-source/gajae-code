@@ -97,6 +97,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	cursor: "CURSOR_ACCESS_TOKEN",
 	deepseek: "DEEPSEEK_API_KEY",
 	"openai-codex": "OPENAI_CODEX_OAUTH_TOKEN",
+	"azure-openai": "AZURE_OPENAI_API_KEY",
 	"azure-openai-responses": "AZURE_OPENAI_API_KEY",
 	exa: "EXA_API_KEY",
 	jina: "JINA_API_KEY",

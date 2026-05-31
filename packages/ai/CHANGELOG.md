@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Anthropic extended-thinking replay after aborted turns by dropping partial `thinking`/`redacted_thinking` blocks before the next request, preserving/synthesizing matching tool results, and retrying once with repaired latest-assistant thinking when Anthropic rejects a replay with the immutable-thinking HTTP 400 ([#107](https://github.com/Yeachan-Heo/gajae-code/issues/107)).
+- Fixed first-class `azure-openai` catalog models so normal provider auth resolution reads `AZURE_OPENAI_API_KEY` when streaming `azure-openai/gpt-*` models.
 
 ## [0.2.1] - 2026-05-30
 

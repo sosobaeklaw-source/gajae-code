@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { getEnvApiKey } from "../src/stream";
 import { type AzureOpenAIResponsesOptions, streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses";
 import type { Context, Model, Tool } from "../src/types";
 
@@ -15,6 +16,13 @@ const azureModel: Model<"azure-openai-responses"> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 400000,
 	maxTokens: 128000,
+};
+
+const firstClassAzureModel: Model<"azure-openai-responses"> = {
+	...azureModel,
+	id: "gpt-4.1",
+	name: "GPT-4.1",
+	provider: "azure-openai",
 };
 
 function createAbortedSignal(): AbortSignal {
@@ -78,6 +86,37 @@ async function captureAzurePayload(
 afterEach(() => {
 	global.fetch = originalFetch;
 	vi.restoreAllMocks();
+});
+
+describe("azure openai first-class provider auth", () => {
+	it("resolves azure-openai provider ids from AZURE_OPENAI_API_KEY", () => {
+		const originalApiKey = Bun.env.AZURE_OPENAI_API_KEY;
+		try {
+			Bun.env.AZURE_OPENAI_API_KEY = "azure-test-key";
+			expect(getEnvApiKey("azure-openai")).toBe("azure-test-key");
+		} finally {
+			if (originalApiKey === undefined) delete Bun.env.AZURE_OPENAI_API_KEY;
+			else Bun.env.AZURE_OPENAI_API_KEY = originalApiKey;
+		}
+	});
+
+	it("uses AZURE_OPENAI_API_KEY for first-class azure-openai/gpt-* stream auth", async () => {
+		const originalApiKey = Bun.env.AZURE_OPENAI_API_KEY;
+		try {
+			Bun.env.AZURE_OPENAI_API_KEY = "azure-env-key";
+			const payload = await captureAzurePayload(
+				{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+				firstClassAzureModel,
+				{},
+			);
+
+			expect(payload.model).toBe("gpt-4.1");
+			expect(getEnvApiKey(firstClassAzureModel.provider)).toBe("azure-env-key");
+		} finally {
+			if (originalApiKey === undefined) delete Bun.env.AZURE_OPENAI_API_KEY;
+			else Bun.env.AZURE_OPENAI_API_KEY = originalApiKey;
+		}
+	});
 });
 
 describe("azure openai responses streaming", () => {
