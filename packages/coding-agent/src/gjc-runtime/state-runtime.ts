@@ -422,10 +422,15 @@ async function handleWrite(
 	cwd: string,
 	positionalSkill: string | undefined,
 ): Promise<StateCommandResult> {
-	const { mode, sessionId, threadId, turnId, payload } = await resolveSelectors(args, cwd, positionalSkill);
+	const selectors = await resolveSelectors(args, cwd, positionalSkill);
+	const { sessionId, threadId, turnId, payload } = selectors;
 	if (!payload) throw new StateCommandError(2, "gjc state write requires --input '<json>'");
+	const mode = selectors.mode ?? (await inferModeFromActiveState(cwd, sessionId));
 	if (!mode)
-		throw new StateCommandError(2, "gjc state write requires --mode <skill>, positional <skill>, or input.skill");
+		throw new StateCommandError(
+			2,
+			"gjc state write requires --mode <skill>, positional <skill>, input.skill, or an active workflow in .gjc/state/skill-active-state.json",
+		);
 
 	const filePath = modeStateFile(cwd, mode, sessionId);
 	const existing = await readJsonFile(filePath);
@@ -489,9 +494,14 @@ async function handleClear(
 	cwd: string,
 	positionalSkill: string | undefined,
 ): Promise<StateCommandResult> {
-	const { mode, sessionId, threadId, turnId } = await resolveSelectors(args, cwd, positionalSkill);
+	const selectors = await resolveSelectors(args, cwd, positionalSkill);
+	const { sessionId, threadId, turnId } = selectors;
+	const mode = selectors.mode ?? (await inferModeFromActiveState(cwd, sessionId));
 	if (!mode)
-		throw new StateCommandError(2, "gjc state clear requires --mode <skill>, positional <skill>, or input.skill");
+		throw new StateCommandError(
+			2,
+			"gjc state clear requires --mode <skill>, positional <skill>, input.skill, or an active workflow in .gjc/state/skill-active-state.json",
+		);
 
 	const filePath = modeStateFile(cwd, mode, sessionId);
 	const existing = (await readJsonFile(filePath)) ?? {};

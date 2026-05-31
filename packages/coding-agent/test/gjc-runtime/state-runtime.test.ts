@@ -327,4 +327,52 @@ describe("native gjc state runtime", () => {
 		);
 		expect((active.active_skills as Array<{ skill: string }>).some(e => e.skill === "ralplan")).toBe(false);
 	});
+
+	it("infers the active workflow for write when --mode/positional/input.skill are absent", async () => {
+		const root = await tempDir();
+		// Activate ralplan via the active-state file (simulating UserPromptSubmit hook output)
+		const stateDir = path.join(root, ".gjc", "state");
+		await fs.mkdir(stateDir, { recursive: true });
+		await fs.writeFile(
+			path.join(stateDir, "skill-active-state.json"),
+			JSON.stringify({
+				version: 1,
+				active: true,
+				skill: "ralplan",
+				active_skills: [{ skill: "ralplan", phase: "planner", active: true }],
+			}),
+		);
+
+		// Bundled prompt shape: gjc state write --input '<json>' (no --mode)
+		const result = await runNativeStateCommand(
+			["write", "--input", JSON.stringify({ phase: "approval", active: true })],
+			root,
+		);
+
+		expect(result.status).toBe(0);
+		const parsed = JSON.parse(result.stdout ?? "{}") as { skill?: string; state?: { current_phase?: string } };
+		expect(parsed.skill).toBe("ralplan");
+		expect(parsed.state?.current_phase).toBe("approval");
+		const onDisk = JSON.parse(await fs.readFile(path.join(stateDir, "ralplan-state.json"), "utf-8"));
+		expect(onDisk.current_phase).toBe("approval");
+	});
+
+	it("infers the active workflow for clear too", async () => {
+		const root = await tempDir();
+		await runNativeStateCommand(
+			["write", "--input", JSON.stringify({ active: true, current_phase: "planner" }), "--mode", "ralplan"],
+			root,
+		);
+		const result = await runNativeStateCommand(["clear"], root);
+		expect(result.status).toBe(0);
+		const onDisk = JSON.parse(await fs.readFile(path.join(root, ".gjc", "state", "ralplan-state.json"), "utf-8"));
+		expect(onDisk.active).toBe(false);
+	});
+
+	it("still errors when no mode is supplied and no active workflow exists", async () => {
+		const root = await tempDir();
+		const result = await runNativeStateCommand(["write", "--input", JSON.stringify({ phase: "approval" })], root);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("active workflow");
+	});
 });

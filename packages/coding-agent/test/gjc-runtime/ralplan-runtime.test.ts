@@ -218,4 +218,49 @@ describe("native gjc ralplan runtime — --write artifact path", () => {
 		expect(JSON.parse(indexLines[0]).stage).toBe("planner");
 		expect(JSON.parse(indexLines[1]).stage).toBe("architect");
 	});
+
+	it("keeps multiple --write calls in the same run when no --run-id is supplied", async () => {
+		const root = await tempDir();
+		const first = await runNativeRalplanCommand(
+			["--write", "--stage", "planner", "--stage_n", "1", "--artifact", "p1", "--json"],
+			root,
+		);
+		expect(first.status).toBe(0);
+		const firstPayload = JSON.parse(first.stdout ?? "{}") as { run_id: string };
+
+		const second = await runNativeRalplanCommand(
+			["--write", "--stage", "architect", "--stage_n", "2", "--artifact", "a2", "--json"],
+			root,
+		);
+		expect(second.status).toBe(0);
+		const secondPayload = JSON.parse(second.stdout ?? "{}") as { run_id: string };
+
+		// Without explicit --run-id, both writes should target the same auto-generated run.
+		expect(secondPayload.run_id).toBe(firstPayload.run_id);
+
+		const indexLines = (
+			await fs.readFile(path.join(root, ".gjc", "plans", "ralplan", firstPayload.run_id, "index.jsonl"), "utf-8")
+		)
+			.trim()
+			.split("\n");
+		expect(indexLines.length).toBe(2);
+		expect(JSON.parse(indexLines[0]).stage).toBe("planner");
+		expect(JSON.parse(indexLines[1]).stage).toBe("architect");
+	});
+
+	it("ralplan consensus handoff seeds run_id that subsequent --write calls reuse", async () => {
+		const root = await tempDir();
+		const handoff = await runNativeRalplanCommand(["--deliberate", "--json", "task"], root);
+		expect(handoff.status).toBe(0);
+		const handoffPayload = JSON.parse(handoff.stdout ?? "{}") as { run_id: string };
+		expect(typeof handoffPayload.run_id).toBe("string");
+
+		const write = await runNativeRalplanCommand(
+			["--write", "--stage", "planner", "--stage_n", "1", "--artifact", "# Plan", "--json"],
+			root,
+		);
+		expect(write.status).toBe(0);
+		const writePayload = JSON.parse(write.stdout ?? "{}") as { run_id: string };
+		expect(writePayload.run_id).toBe(handoffPayload.run_id);
+	});
 });

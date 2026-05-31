@@ -134,6 +134,47 @@ interface ResolvedArtifactArgs {
 	json: boolean;
 }
 
+function ralplanStatePath(cwd: string, sessionId: string | undefined): string {
+	const stateDir = sessionId
+		? path.join(cwd, ".gjc", "state", "sessions", encodeSessionSegment(sessionId))
+		: path.join(cwd, ".gjc", "state");
+	return path.join(stateDir, "ralplan-state.json");
+}
+
+async function readActiveRunId(cwd: string, sessionId: string | undefined): Promise<string | undefined> {
+	try {
+		const raw = await fs.readFile(ralplanStatePath(cwd, sessionId), "utf-8");
+		const parsed = JSON.parse(raw) as { run_id?: unknown };
+		const candidate = typeof parsed.run_id === "string" ? parsed.run_id.trim() : "";
+		if (!candidate) return undefined;
+		assertSafePathComponent(candidate, "run-id");
+		return candidate;
+	} catch {
+		return undefined;
+	}
+}
+
+async function persistActiveRunId(cwd: string, sessionId: string | undefined, runId: string): Promise<void> {
+	const statePath = ralplanStatePath(cwd, sessionId);
+	let existing: Record<string, unknown> = {};
+	try {
+		const raw = await fs.readFile(statePath, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			existing = parsed as Record<string, unknown>;
+		}
+	} catch {
+		// fresh receipt; fall through to create
+	}
+	if (existing.run_id === runId) return;
+	existing.run_id = runId;
+	if (typeof existing.skill !== "string") existing.skill = "ralplan";
+	if (typeof existing.active !== "boolean") existing.active = true;
+	existing.updated_at = new Date().toISOString();
+	await fs.mkdir(path.dirname(statePath), { recursive: true });
+	await fs.writeFile(statePath, `${JSON.stringify(existing, null, 2)}\n`);
+}
+
 async function resolveArtifactArgs(args: readonly string[], cwd: string): Promise<ResolvedArtifactArgs> {
 	const stage = flagValue(args, "--stage");
 	if (!stage) throw new RalplanCommandError(2, "--stage is required for ralplan --write");
@@ -146,13 +187,20 @@ async function resolveArtifactArgs(args: readonly string[], cwd: string): Promis
 		throw new RalplanCommandError(2, "--artifact is required for ralplan --write");
 	}
 
-	const runIdFlag = flagValue(args, "--run-id") ?? flagValue(args, "--session-id");
-	const runId = runIdFlag?.trim() || defaultRunId();
-	assertSafePathComponent(runId, "run-id");
-
 	const sessionIdRaw = flagValue(args, "--session-id")?.trim();
 	const sessionId = sessionIdRaw || undefined;
 	if (sessionId) assertSafePathComponent(sessionId, "session-id");
+
+	// Precedence for run_id:
+	//   1. explicit --run-id flag
+	//   2. existing run_id field in .gjc/state[/sessions/<id>]/ralplan-state.json
+	//   3. explicit --session-id flag (use as run id)
+	//   4. freshly generated default run id
+	const explicitRunId = flagValue(args, "--run-id")?.trim();
+	const runId = explicitRunId || (await readActiveRunId(cwd, sessionId)) || sessionIdRaw || defaultRunId();
+	assertSafePathComponent(runId, "run-id");
+	// Persist the active run id so later writes in the same loop land in the same directory.
+	await persistActiveRunId(cwd, sessionId, runId);
 
 	const artifact = await resolveArtifactContent(rawArtifact, cwd);
 	return { stage: stage as RalplanStage, stageN, runId, artifact, sessionId, json: hasFlag(args, "--json") };
@@ -325,12 +373,20 @@ function encodeSessionSegment(value: string): string {
 	return encodeURIComponent(value).replaceAll(".", "%2E");
 }
 
-async function seedRalplanState(cwd: string, resolved: ConsensusHandoffArgs): Promise<string> {
+async function seedRalplanState(
+	cwd: string,
+	resolved: ConsensusHandoffArgs,
+): Promise<{ statePath: string; runId: string }> {
 	const stateDir = resolved.sessionId
 		? path.join(cwd, ".gjc", "state", "sessions", encodeSessionSegment(resolved.sessionId))
 		: path.join(cwd, ".gjc", "state");
 	await fs.mkdir(stateDir, { recursive: true });
 	const statePath = path.join(stateDir, "ralplan-state.json");
+	// Reuse an existing run id when present so a re-invocation of `gjc ralplan "task"` doesn't
+	// orphan in-progress artifacts under a fresh run id.
+	const existingRunId = await readActiveRunId(cwd, resolved.sessionId);
+	const runId = existingRunId ?? resolved.sessionId ?? defaultRunId();
+	assertSafePathComponent(runId, "run-id");
 	const now = new Date().toISOString();
 	const payload: Record<string, unknown> = {
 		active: true,
@@ -339,13 +395,14 @@ async function seedRalplanState(cwd: string, resolved: ConsensusHandoffArgs): Pr
 		mode: resolved.deliberate ? "deliberate" : "short",
 		interactive: resolved.interactive,
 		task: resolved.task,
+		run_id: runId,
 		updated_at: now,
 	};
 	if (resolved.architectKind) payload.architect_kind = resolved.architectKind;
 	if (resolved.criticKind) payload.critic_kind = resolved.criticKind;
 	if (resolved.sessionId) payload.session_id = resolved.sessionId;
 	await fs.writeFile(statePath, `${JSON.stringify(payload, null, 2)}\n`);
-	return statePath;
+	return { statePath, runId };
 }
 
 async function handleConsensusHandoff(args: readonly string[], cwd: string): Promise<RalplanCommandResult> {
@@ -353,7 +410,7 @@ async function handleConsensusHandoff(args: readonly string[], cwd: string): Pro
 	if (!resolved.task) {
 		throw new RalplanCommandError(2, 'gjc ralplan requires a task description, e.g. `gjc ralplan "<task>"`.');
 	}
-	const statePath = await seedRalplanState(cwd, resolved);
+	const { statePath, runId } = await seedRalplanState(cwd, resolved);
 	const mode = resolved.deliberate ? "deliberate" : "short";
 	await syncRalplanHud({
 		cwd,
@@ -372,12 +429,14 @@ async function handleConsensusHandoff(args: readonly string[], cwd: string): Pro
 		critic: resolved.criticKind ?? "default",
 		task: resolved.task,
 		state_path: statePath,
+		run_id: runId,
 		handoff: "Run `/skill:ralplan` inside the GJC agent to drive the Planner / Architect / Critic consensus loop.",
 	};
 	const stdout = resolved.json
 		? `${JSON.stringify(summary, null, 2)}\n`
 		: [
 				`Seeded ralplan ${summary.mode} run (${resolved.interactive ? "interactive" : "automated"}) at ${statePath}.`,
+				`Active run_id: ${runId}`,
 				resolved.architectKind ? `Architect: ${resolved.architectKind}` : undefined,
 				resolved.criticKind ? `Critic: ${resolved.criticKind}` : undefined,
 				"Run `/skill:ralplan` inside the GJC agent to execute the consensus loop.",
