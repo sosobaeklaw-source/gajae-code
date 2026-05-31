@@ -85,8 +85,11 @@ function assertKnownStage(stage: string): asserts stage is RalplanStage {
 
 function parseStageN(raw: string | undefined): number {
 	if (!raw) throw new RalplanCommandError(2, "--stage_n is required");
+	if (!/^[1-9][0-9]{0,2}$/.test(raw)) {
+		throw new RalplanCommandError(2, `invalid --stage_n: ${raw}. Expected integer 1..999.`);
+	}
 	const value = Number.parseInt(raw, 10);
-	if (!Number.isInteger(value) || value < 1 || value > 999) {
+	if (value < 1 || value > 999) {
 		throw new RalplanCommandError(2, `invalid --stage_n: ${raw}. Expected integer 1..999.`);
 	}
 	return value;

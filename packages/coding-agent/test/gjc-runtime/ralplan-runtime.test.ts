@@ -177,6 +177,18 @@ describe("native gjc ralplan runtime — --write artifact path", () => {
 		expect(result.stderr).toContain("invalid --stage_n");
 	});
 
+	it("rejects malformed non-integer --stage_n like '1.5' or '1abc' with exit 2", async () => {
+		const root = await tempDir();
+		for (const bad of ["1.5", "1abc", "0", "-1", "abc"]) {
+			const result = await runNativeRalplanCommand(
+				["--write", "--stage", "planner", "--stage_n", bad, "--artifact", "x"],
+				root,
+			);
+			expect(result.status, `expected rejection for ${bad}`).toBe(2);
+			expect(result.stderr).toContain("invalid --stage_n");
+		}
+	});
+
 	it("rejects --run-id with traversal characters with exit 2", async () => {
 		const root = await tempDir();
 		const result = await runNativeRalplanCommand(
