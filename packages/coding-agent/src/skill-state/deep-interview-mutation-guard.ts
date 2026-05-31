@@ -6,9 +6,9 @@ import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import { listActiveSkills, readVisibleSkillActiveState, type SkillActiveEntry } from "./active-state";
 import {
+	type CanonicalGjcWorkflowSkill,
 	sanctionedWorkflowStateCommand,
 	workflowModeStateFileName,
-	type CanonicalGjcWorkflowSkill,
 } from "./workflow-state-contract";
 
 export const DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE =
@@ -292,8 +292,7 @@ function isGjcManagedPath(cwd: string, rawPath: string): boolean {
 function isAllowlistedPath(cwd: string, rawPath: string): boolean {
 	const segments = relativeGjcSegments(cwd, rawPath);
 	if (!segments || segments[0] !== ".gjc") return false;
-	if (segments[1] === "specs" || segments[1] === "plans") return true;
-	return segments[1] === "state" && blockedWorkflowStateSkill(cwd, rawPath) === null;
+	return segments[1] === "specs" || segments[1] === "plans";
 }
 
 function hasGjcManagedTarget(cwd: string, targets: ExtractedTargets): boolean {
@@ -302,7 +301,9 @@ function hasGjcManagedTarget(cwd: string, targets: ExtractedTargets): boolean {
 }
 
 function allTargetsAllowlisted(cwd: string, targets: ExtractedTargets): boolean {
-	return !targets.unknown && targets.paths.length > 0 && targets.paths.every(rawPath => isAllowlistedPath(cwd, rawPath));
+	return (
+		!targets.unknown && targets.paths.length > 0 && targets.paths.every(rawPath => isAllowlistedPath(cwd, rawPath))
+	);
 }
 export async function assertDeepInterviewMutationRawPathsAllowed(input: {
 	cwd: string;
@@ -341,15 +342,23 @@ export async function getDeepInterviewMutationDecision(
 		return { blocked: false, targets: [] };
 	}
 	if (input.forceOverride) return { blocked: false, targets: [] };
-	if (allTargetsAllowlisted(input.cwd, targets)) {
-		return { blocked: false, targets: targets.paths };
+	if (targets.unknown) {
+		return {
+			blocked: true,
+			message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
+			targets: targets.paths,
+			reason: "unknown-target",
+		};
 	}
-	return {
-		blocked: true,
-		message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
-		targets: targets.paths,
-		reason: targets.unknown ? "unknown-target" : "gjc-managed-target",
-	};
+	if (hasGjcManagedTarget(input.cwd, targets) && !allTargetsAllowlisted(input.cwd, targets)) {
+		return {
+			blocked: true,
+			message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
+			targets: targets.paths,
+			reason: "gjc-managed-target",
+		};
+	}
+	return { blocked: false, targets: targets.paths };
 }
 
 export async function assertDeepInterviewMutationAllowed(input: DeepInterviewMutationGuardInput): Promise<void> {

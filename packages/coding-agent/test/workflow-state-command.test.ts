@@ -5,23 +5,38 @@ import * as path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
+const workflowSkills = ["deep-interview", "ralplan", "ultragoal", "team"] as const;
+
+async function withTempCwd<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-state-command-"));
+	try {
+		return await fn(cwd);
+	} finally {
+		await fs.rm(cwd, { recursive: true, force: true });
+	}
+}
+
+function runState(cwd: string, args: string[]) {
+	return Bun.spawnSync(["bun", cliEntry, "state", ...args], {
+		cwd,
+		stderr: "pipe",
+		stdout: "pipe",
+		env: { ...process.env, GJC_RUNTIME_BINARY: "" },
+	});
+}
 
 describe("gjc state workflow command", () => {
-	it("writes readable canonical state and receipt for workflow skills", async () => {
-		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-state-command-"));
-		try {
-			const result = Bun.spawnSync(
-				[
-					"bun",
-					cliEntry,
-					"state",
-					"deep-interview",
+	it("writes readable canonical state and receipt for workflow skills through documented invocation", async () => {
+		await withTempCwd(async cwd => {
+			for (const skill of workflowSkills) {
+				const result = runState(cwd, [
 					"write",
 					"--session-id",
-					"session-1",
+					`session-${skill}`,
 					"--input",
 					JSON.stringify({
-						phase: "interviewing",
+						skill,
+						current_phase: "initializing",
 						active: true,
 						hud: {
 							version: 1,
@@ -30,35 +45,76 @@ describe("gjc state workflow command", () => {
 						state: { blocked_reason: "execution approval missing" },
 					}),
 					"--json",
-				],
-				{ cwd, stderr: "pipe", stdout: "pipe", env: { ...process.env, GJC_RUNTIME_BINARY: "" } },
-			);
-			expect(result.exitCode, result.stderr.toString()).toBe(0);
-			const stdout = result.stdout.toString();
-			expect(stdout).toContain("\n  \"receipt\": {");
-			const payload = JSON.parse(stdout) as { receipt: { skill: string; owner: string; status: string } };
-			expect(payload.receipt).toMatchObject({ skill: "deep-interview", owner: "gjc-state-cli", status: "fresh" });
+				]);
+				expect(result.exitCode, result.stderr.toString()).toBe(0);
+				const payload = JSON.parse(result.stdout.toString()) as {
+					receipt: { skill: string; owner: string; status: string };
+				};
+				expect(payload.receipt).toMatchObject({ skill, owner: "gjc-state-cli", status: "fresh" });
+
+				const modeState = await Bun.file(
+					path.join(cwd, ".gjc", "state", "sessions", `session-${skill}`, `${skill}-state.json`),
+				).json();
+				expect(modeState).toMatchObject({
+					skill,
+					current_phase: "initializing",
+					blocked_reason: "execution approval missing",
+				});
+				expect(modeState.receipt.command).toBe(`gjc state ${skill} write`);
+
+				const activeState = await Bun.file(
+					path.join(cwd, ".gjc", "state", "sessions", `session-${skill}`, "skill-active-state.json"),
+				).json();
+				expect(activeState.active_skills[0]).toMatchObject({
+					skill,
+					phase: "initializing",
+					receipt: { owner: "gjc-state-cli" },
+				});
+			}
+		});
+	}, 30_000);
+
+	it("infers read skill from session context and prefers incoming phase transitions", async () => {
+		await withTempCwd(async cwd => {
+			const initial = runState(cwd, [
+				"write",
+				"--session-id",
+				"session-1",
+				"--input",
+				JSON.stringify({
+					skill: "deep-interview",
+					current_phase: "interviewing",
+					state: { current_phase: "ignored" },
+				}),
+				"--json",
+			]);
+			expect(initial.exitCode, initial.stderr.toString()).toBe(0);
+
+			const transition = runState(cwd, [
+				"write",
+				"--session-id",
+				"session-1",
+				"--input",
+				JSON.stringify({ skill: "deep-interview", phase: "approval", state: { current_phase: "stale" } }),
+				"--json",
+			]);
+			expect(transition.exitCode, transition.stderr.toString()).toBe(0);
 
 			const modeState = await Bun.file(
 				path.join(cwd, ".gjc", "state", "sessions", "session-1", "deep-interview-state.json"),
 			).json();
-			expect(modeState).toMatchObject({
-				skill: "deep-interview",
-				current_phase: "interviewing",
-				blocked_reason: "execution approval missing",
-			});
-			expect(modeState.receipt.command).toBe("gjc state deep-interview write");
+			expect(modeState.current_phase).toBe("approval");
 
 			const activeState = await Bun.file(
 				path.join(cwd, ".gjc", "state", "sessions", "session-1", "skill-active-state.json"),
 			).json();
-			expect(activeState.active_skills[0]).toMatchObject({
-				skill: "deep-interview",
-				phase: "interviewing",
-				receipt: { owner: "gjc-state-cli" },
-			});
-		} finally {
-			await fs.rm(cwd, { recursive: true, force: true });
-		}
-	}, 15_000);
+			expect(activeState.active_skills[0]).toMatchObject({ skill: "deep-interview", phase: "approval" });
+
+			const read = runState(cwd, ["read", "--session-id", "session-1", "--json"]);
+			expect(read.exitCode, read.stderr.toString()).toBe(0);
+			const readPayload = JSON.parse(read.stdout.toString()) as { skill: string; state: { current_phase: string } };
+			expect(readPayload.skill).toBe("deep-interview");
+			expect(readPayload.state.current_phase).toBe("approval");
+		});
+	}, 20_000);
 });

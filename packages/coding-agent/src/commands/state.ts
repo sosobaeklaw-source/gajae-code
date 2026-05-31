@@ -1,13 +1,18 @@
-import { Command } from "@gajae-code/utils/cli";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { syncSkillActiveState, type WorkflowHudSummary } from "../skill-state/active-state";
+import { Command } from "@gajae-code/utils/cli";
+import {
+	listActiveSkills,
+	readVisibleSkillActiveState,
+	syncSkillActiveState,
+	type WorkflowHudSummary,
+} from "../skill-state/active-state";
 import {
 	buildWorkflowStateReceipt,
 	canonicalWorkflowSkill,
 	describeWorkflowStateContract,
-	workflowStateStoragePath,
 	type WorkflowStateReceipt,
+	workflowStateStoragePath,
 } from "../skill-state/workflow-state-contract";
 import { runBridgedRuntimeEndpoint } from "./gjc-runtime-bridge";
 
@@ -23,7 +28,9 @@ interface ParsedStateArgs {
 
 interface WorkflowStatePayload {
 	active?: boolean;
+	skill?: string;
 	phase?: string;
+	current_phase?: string;
 	hud?: WorkflowHudSummary;
 	state?: Record<string, unknown>;
 }
@@ -59,8 +66,15 @@ function parseStateArgs(argv: string[]): ParsedStateArgs {
 		}
 		positional.push(arg);
 	}
-	parsed.skill = positional[0];
-	parsed.action = positional[1];
+	if (
+		(positional[0] === "read" || positional[0] === "write" || positional[0] === "contract") &&
+		positional[1] === undefined
+	) {
+		parsed.action = positional[0];
+	} else {
+		parsed.skill = positional[0];
+		parsed.action = positional[1];
+	}
 	return parsed;
 }
 
@@ -74,7 +88,9 @@ function readInputPayload(input: string | undefined): WorkflowStatePayload {
 async function readJsonFile(filePath: string): Promise<Record<string, unknown> | null> {
 	try {
 		const parsed = JSON.parse(await Bun.file(filePath).text()) as unknown;
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: null;
 	} catch {
 		return null;
 	}
@@ -85,6 +101,16 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
 	await Bun.write(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function payloadSkill(payload: WorkflowStatePayload): string | undefined {
+	if (typeof payload.skill === "string") return payload.skill;
+	if (payload.state && typeof payload.state.skill === "string") return payload.state.skill;
+	return undefined;
+}
+
+function payloadPhase(payload: WorkflowStatePayload): unknown {
+	return payload.phase ?? payload.current_phase ?? payload.state?.current_phase;
+}
+
 function writeOutput(value: unknown, json: boolean): void {
 	if (json) {
 		process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -92,13 +118,15 @@ function writeOutput(value: unknown, json: boolean): void {
 	}
 	if (value && typeof value === "object" && "receipt" in value) {
 		const receipt = (value as { receipt: WorkflowStateReceipt }).receipt;
-		process.stdout.write([
-			`Updated ${receipt.skill} workflow state`,
-			`state: ${receipt.state_path}`,
-			`storage: ${receipt.storage_path}`,
-			`receipt: ${receipt.status} until ${receipt.fresh_until}`,
-			`command: ${receipt.command}`,
-		].join("\n") + "\n");
+		process.stdout.write(
+			`${[
+				`Updated ${receipt.skill} workflow state`,
+				`state: ${receipt.state_path}`,
+				`storage: ${receipt.storage_path}`,
+				`receipt: ${receipt.status} until ${receipt.fresh_until}`,
+				`command: ${receipt.command}`,
+			].join("\n")}\n`,
+		);
 		return;
 	}
 	process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -106,10 +134,15 @@ function writeOutput(value: unknown, json: boolean): void {
 
 async function runNativeWorkflowStateCommand(argv: string[]): Promise<boolean> {
 	const args = parseStateArgs(argv);
-	const skill = args.skill ? canonicalWorkflowSkill(args.skill) : null;
-	if (!skill) return false;
 	const action = args.action ?? "read";
+	const payload = action === "write" ? readInputPayload(args.input) : {};
 	const cwd = process.cwd();
+	let skill = canonicalWorkflowSkill(args.skill ?? payloadSkill(payload) ?? "");
+	if (!skill && action === "read") {
+		const activeState = await readVisibleSkillActiveState(cwd, args.sessionId);
+		skill = canonicalWorkflowSkill(String(listActiveSkills(activeState)[0]?.skill ?? activeState?.skill ?? ""));
+	}
+	if (!skill) return false;
 	const storagePath = workflowStateStoragePath(cwd, skill, args.sessionId);
 	if (action === "contract") {
 		writeOutput({ skill, contract: describeWorkflowStateContract(skill) }, args.json);
@@ -120,7 +153,6 @@ async function runNativeWorkflowStateCommand(argv: string[]): Promise<boolean> {
 		return true;
 	}
 	if (action !== "write") return false;
-	const payload = readInputPayload(args.input);
 	const nowIso = new Date().toISOString();
 	const receipt = buildWorkflowStateReceipt({
 		cwd,
@@ -131,13 +163,18 @@ async function runNativeWorkflowStateCommand(argv: string[]): Promise<boolean> {
 		nowIso,
 	});
 	const existing = (await readJsonFile(storagePath)) ?? {};
+	const incomingPhase = payloadPhase(payload);
+	const currentPhase =
+		typeof incomingPhase === "string" && incomingPhase.trim()
+			? incomingPhase.trim()
+			: String(existing.current_phase ?? "active");
 	const nextState = {
 		...existing,
 		...(payload.state ?? {}),
 		version: typeof existing.version === "number" ? existing.version : 1,
 		skill,
 		active: payload.active ?? existing.active ?? true,
-		current_phase: payload.phase ?? existing.current_phase ?? payload.state?.current_phase ?? "active",
+		current_phase: currentPhase,
 		updated_at: nowIso,
 		receipt,
 	};
@@ -146,7 +183,7 @@ async function runNativeWorkflowStateCommand(argv: string[]): Promise<boolean> {
 		cwd,
 		skill,
 		active: Boolean(nextState.active),
-		phase: String(nextState.current_phase),
+		phase: currentPhase,
 		sessionId: args.sessionId,
 		threadId: args.threadId,
 		turnId: args.turnId,

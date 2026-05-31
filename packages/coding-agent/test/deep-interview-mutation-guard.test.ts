@@ -84,31 +84,52 @@ describe("deep-interview mutation guard", () => {
 		}
 	});
 
-	it("blocks direct .gjc targets while deep-interview is active", async () => {
+	it("allows planning artifacts and blocks canonical workflow state targets", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveDeepInterview(cwd);
 
+		for (const rawPath of [".gjc/specs/deep-interview-x.md", ".gjc/plans/plan.md"]) {
+			const decision = await getDeepInterviewMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("write"),
+				args: { path: rawPath, content: "x" },
+			});
+			expect(decision.blocked).toBe(false);
+		}
+
 		const blockedCases: Array<[string, AgentTool, unknown]> = [
-			["write spec", tool("write"), { path: ".gjc/specs/deep-interview-x.md", content: "x" }],
-			["write state", tool("write"), { path: ".gjc/state/deep-interview-x.json", content: "{}" }],
+			["write active", tool("write"), { path: ".gjc/state/skill-active-state.json", content: "{}" }],
 			[
-				"edit spec",
-				tool("edit"),
-				{ path: ".gjc/specs/deep-interview-x.md", edits: [{ old_text: "a", new_text: "b" }] },
+				"write session active",
+				tool("write"),
+				{ path: ".gjc/state/sessions/session-a/skill-active-state.json", content: "{}" },
 			],
+			...(["deep-interview", "ralplan", "ultragoal", "team"] as const).map(
+				skill =>
+					[
+						`write ${skill}`,
+						tool("write"),
+						{ path: `.gjc/state/sessions/session-a/${skill}-state.json`, content: "{}" },
+					] as [string, AgentTool, unknown],
+			),
 			[
-				"apply_patch spec",
+				"apply_patch state",
 				tool("edit", { mode: "apply_patch", customWireName: "apply_patch" }),
 				{
-					input: "*** Begin Patch\n*** Update File: .gjc/specs/deep-interview-x.md\n@@\n-a\n+b\n*** End Patch\n",
+					input: "*** Begin Patch\n*** Update File: .gjc/state/team-state.json\n@@\n-a\n+b\n*** End Patch\n",
 				},
 			],
 			[
-				"vim spec",
+				"vim state",
 				tool("edit", { mode: "vim" }),
-				{ file: ".gjc/specs/deep-interview-x.md", steps: [{ kbd: [":edit .gjc/state/note.md<CR>"] }] },
+				{ file: "src/foo.ts", steps: [{ kbd: [":edit .gjc/state/sessions/session-a/ralplan-state.json<CR>"] }] },
 			],
-			["ast_edit state", tool("ast_edit"), { paths: [".gjc/state/**/*.md"], ops: [{ pat: "foo", out: "bar" }] }],
+			[
+				"ast_edit state",
+				tool("ast_edit"),
+				{ paths: [".gjc/state/**/team-state.json"], ops: [{ pat: "foo", out: "bar" }] },
+			],
 		];
 
 		for (const [, targetTool, args] of blockedCases) {
@@ -119,7 +140,11 @@ describe("deep-interview mutation guard", () => {
 				args,
 			});
 			expect(decision.blocked).toBe(true);
-			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			if (decision.reason === "workflow-state-target") {
+				expect(decision.message).toContain("Workflow state JSON is runtime-owned");
+			} else {
+				expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			}
 		}
 	});
 
@@ -157,7 +182,7 @@ describe("deep-interview mutation guard", () => {
 			cwd,
 			sessionId: "session-a",
 			tool: tool("ast_edit"),
-			args: { paths: [".gjc/specs/**/*.md", "packages/**"], ops: [{ pat: "foo", out: "bar" }] },
+			args: { paths: [".gjc/state/deep-interview-state.json", "packages/**"], ops: [{ pat: "foo", out: "bar" }] },
 		});
 		expect(mixed.blocked).toBe(true);
 	});

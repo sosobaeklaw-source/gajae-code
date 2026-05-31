@@ -1,9 +1,6 @@
 import * as path from "node:path";
-import {
-	CANONICAL_GJC_WORKFLOW_SKILLS,
-	SKILL_ACTIVE_STATE_FILE,
-	type CanonicalGjcWorkflowSkill,
-} from "./active-state";
+import { CANONICAL_GJC_WORKFLOW_SKILLS, type CanonicalGjcWorkflowSkill, SKILL_ACTIVE_STATE_FILE } from "./active-state";
+
 export type { CanonicalGjcWorkflowSkill };
 
 export const WORKFLOW_STATE_RECEIPT_VERSION = 1;
@@ -40,7 +37,14 @@ export function workflowModeStateFileName(skill: CanonicalGjcWorkflowSkill): str
 export function workflowStateStoragePath(cwd: string, skill: CanonicalGjcWorkflowSkill, sessionId?: string): string {
 	const normalizedSessionId = safeString(sessionId).trim();
 	if (normalizedSessionId) {
-		return path.join(cwd, ".gjc", "state", "sessions", encodePathSegment(normalizedSessionId), workflowModeStateFileName(skill));
+		return path.join(
+			cwd,
+			".gjc",
+			"state",
+			"sessions",
+			encodePathSegment(normalizedSessionId),
+			workflowModeStateFileName(skill),
+		);
 	}
 	return path.join(cwd, ".gjc", "state", workflowModeStateFileName(skill));
 }
@@ -48,7 +52,14 @@ export function workflowStateStoragePath(cwd: string, skill: CanonicalGjcWorkflo
 export function workflowActiveStatePath(cwd: string, sessionId?: string): string {
 	const normalizedSessionId = safeString(sessionId).trim();
 	if (normalizedSessionId) {
-		return path.join(cwd, ".gjc", "state", "sessions", encodePathSegment(normalizedSessionId), SKILL_ACTIVE_STATE_FILE);
+		return path.join(
+			cwd,
+			".gjc",
+			"state",
+			"sessions",
+			encodePathSegment(normalizedSessionId),
+			SKILL_ACTIVE_STATE_FILE,
+		);
 	}
 	return path.join(cwd, ".gjc", "state", SKILL_ACTIVE_STATE_FILE);
 }
@@ -78,7 +89,10 @@ export function buildWorkflowStateReceipt(input: {
 	};
 }
 
-export function workflowReceiptStatus(receipt: WorkflowStateReceipt | undefined, nowMs = Date.now()): WorkflowStateReceiptStatus | undefined {
+export function workflowReceiptStatus(
+	receipt: WorkflowStateReceipt | undefined,
+	nowMs = Date.now(),
+): WorkflowStateReceiptStatus | undefined {
 	if (!receipt) return undefined;
 	const freshUntilMs = Date.parse(receipt.fresh_until);
 	if (!Number.isFinite(freshUntilMs)) return "stale";

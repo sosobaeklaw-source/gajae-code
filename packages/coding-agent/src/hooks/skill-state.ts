@@ -3,7 +3,12 @@ import * as path from "node:path";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { isUltragoalBypassPrompt, readUltragoalVerificationState } from "../gjc-runtime/ultragoal-guard";
 import { buildSessionContext, loadEntriesFromFile, type SessionEntry } from "../session/session-manager";
-import type { SkillActiveEntry as CanonicalSkillActiveEntry, WorkflowHudSummary } from "../skill-state/active-state";
+import {
+	type SkillActiveEntry as CanonicalSkillActiveEntry,
+	syncSkillActiveState,
+	type WorkflowHudSummary,
+} from "../skill-state/active-state";
+import { buildWorkflowStateReceipt, type WorkflowStateReceipt } from "../skill-state/workflow-state-contract";
 import {
 	compareSkillKeywordMatches,
 	GJC_SKILL_KEYWORD_DEFINITIONS,
@@ -99,6 +104,7 @@ export interface SkillActiveState {
 	session_id?: string;
 	thread_id?: string;
 	turn_id?: string;
+	receipt?: WorkflowStateReceipt;
 	initialized_mode?: GjcWorkflowSkill;
 	initialized_state_path?: string;
 	active_skills: SkillActiveEntry[];
@@ -112,6 +118,7 @@ export interface ModeState {
 	thread_id?: string;
 	cwd?: string;
 	updated_at?: string;
+	receipt?: WorkflowStateReceipt;
 	[key: string]: unknown;
 }
 
@@ -294,6 +301,14 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 	const nowIso = input.nowIso ?? new Date().toISOString();
 	const phase = initialPhaseForSkill(match.skill);
 	const initializedStatePath = modeStatePath(resolvedStateDir, match.skill, input.sessionId);
+	const receipt = buildWorkflowStateReceipt({
+		cwd: input.cwd,
+		skill: match.skill,
+		owner: "gjc-hook",
+		command: `gjc state ${match.skill} write`,
+		sessionId: input.sessionId,
+		nowIso,
+	});
 	const entry: SkillActiveEntry = {
 		skill: match.skill,
 		phase,
@@ -303,6 +318,7 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 		...(input.sessionId ? { session_id: input.sessionId } : {}),
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
+		receipt,
 	};
 	const state: SkillActiveState = {
 		version: 1,
@@ -316,6 +332,7 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 		...(input.sessionId ? { session_id: input.sessionId } : {}),
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
+		receipt,
 		initialized_mode: match.skill,
 		initialized_state_path: initializedStatePath,
 		active_skills: [entry],
@@ -329,6 +346,7 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 		...(input.sessionId ? { session_id: input.sessionId } : {}),
 		...(input.threadId ? { thread_id: input.threadId } : {}),
 		...(input.turnId ? { turn_id: input.turnId } : {}),
+		receipt,
 	};
 	if (match.skill === "deep-interview") {
 		modeState.threshold = DEFAULT_DEEP_INTERVIEW_AMBIGUITY_THRESHOLD;
@@ -336,6 +354,18 @@ export async function recordSkillActivation(input: RecordSkillActivationInput): 
 	}
 
 	await writeJsonFile(initializedStatePath, modeState);
+	await syncSkillActiveState({
+		cwd: input.cwd,
+		skill: match.skill,
+		active: true,
+		phase,
+		sessionId: input.sessionId,
+		threadId: input.threadId,
+		turnId: input.turnId,
+		nowIso,
+		source: "gjc-skill-state-hook",
+		receipt,
+	});
 	await writeJsonFile(skillStatePath(resolvedStateDir, input.sessionId), state);
 	if (!input.sessionId) return state;
 	await writeJsonFile(skillStatePath(resolvedStateDir), state);
@@ -484,7 +514,7 @@ export function buildSkillActivationAdditionalContext(
 	return [
 		`GJC native UserPromptSubmit detected workflow keyword "${state.keyword}" -> ${state.skill}.`,
 		state.initialized_mode && state.initialized_state_path
-			? `skill: ${state.initialized_mode} activated and initial state initialized at ${state.initialized_state_path}; use \`gjc state write/read/clear --input '<json>' --json\` for runtime state updates when the private GJC runtime endpoint is available.`
+			? `skill: ${state.initialized_mode} activated and initial state initialized at ${state.initialized_state_path}; use \`gjc state write/read --input '<json>' --json\` for runtime state updates when the private GJC runtime endpoint is available.`
 			: null,
 		state.skill === "ultragoal"
 			? "Ultragoal is active. If the user prompt is a steering request, use `gjc ultragoal steer` to add or steer subgoals."

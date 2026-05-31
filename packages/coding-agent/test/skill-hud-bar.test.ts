@@ -119,5 +119,4 @@ describe("skill HUD bar renderer", () => {
 		expect(rendered).toContain("next=ask user for approval");
 		expect(rendered).toContain("receipt=fresh");
 	});
-
 });
