@@ -95,7 +95,6 @@
 		"./mcp/*": null,
 		"./runtime-mcp": null,
 		"./runtime-mcp/*": null,
-		"./commands/gjc-runtime-bridge": null,
 		"./capability/mcp": null,
 		"./config/mcp-schema": null,
 		"./discovery/mcp-json": null,
