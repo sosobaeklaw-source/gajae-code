@@ -108,8 +108,12 @@ modelBindings:
 - `openai-codex-responses`
 - `azure-openai-responses`
 - `anthropic-messages`
+- `bedrock-converse-stream`
 - `google-generative-ai`
 - `google-vertex`
+- `google-gemini-cli`
+- `ollama-chat`
+- `cursor-agent`
 
 ### Allowed auth/discovery values
 
