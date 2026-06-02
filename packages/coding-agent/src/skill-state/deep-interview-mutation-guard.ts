@@ -415,6 +415,9 @@ export async function getDeepInterviewMutationDecision(
 			reason: "unknown-target",
 		};
 	}
+	if (input.tool.name === "bash") {
+		return { blocked: false, targets: targets.paths };
+	}
 	return {
 		blocked: true,
 		message: DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,

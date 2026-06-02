@@ -118,6 +118,14 @@ describe("GJC native skill-state hooks", () => {
 		expect(blockedProduct.reason).toBe("phase-boundary");
 		expect(blockedProduct.message).toContain("handoff/spec before code edits");
 
+		const allowedReadOnlyBash = await getDeepInterviewMutationDecision({
+			cwd: root,
+			sessionId: "session-rich",
+			tool: { name: "bash" } as never,
+			args: { command: "git status --short" },
+		});
+		expect(allowedReadOnlyBash.blocked).toBe(false);
+
 		const blockedSpec = await getDeepInterviewMutationDecision({
 			cwd: root,
 			sessionId: "session-rich",
@@ -127,6 +135,15 @@ describe("GJC native skill-state hooks", () => {
 		expect(blockedSpec.blocked).toBe(true);
 		expect(blockedSpec.reason).toBe("gjc-target");
 		expect(blockedSpec.message).toContain("runtime-owned");
+
+		const blockedGjcBash = await getDeepInterviewMutationDecision({
+			cwd: root,
+			sessionId: "session-rich",
+			tool: { name: "bash" } as never,
+			args: { command: "cat sample.md > .gjc/specs/deep-interview-sample.md" },
+		});
+		expect(blockedGjcBash.blocked).toBe(true);
+		expect(blockedGjcBash.reason).toBe("gjc-target");
 
 		const blocked = await getDeepInterviewMutationDecision({
 			cwd: root,

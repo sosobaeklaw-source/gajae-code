@@ -199,6 +199,51 @@ describe("deep-interview mutation guard", () => {
 		expect(mixed.blocked).toBe(true);
 	});
 
+	it("allows read-only bash during active deep-interview when no mutation target is extracted", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		for (const command of [
+			"git status --short",
+			"rg deep-interview packages/coding-agent/src",
+			"cat packages/coding-agent/package.json",
+			"sed -n '1,80p' packages/coding-agent/src/skill-state/deep-interview-mutation-guard.ts",
+			"bun test packages/coding-agent/test/deep-interview-mutation-guard.test.ts",
+		]) {
+			const decision = await getDeepInterviewMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(false);
+			expect(decision.targets).toEqual([]);
+		}
+	});
+
+	it("blocks mutating bash that targets .gjc during active deep-interview", async () => {
+		const cwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+
+		for (const command of [
+			"rm .gjc/state/deep-interview-state.json",
+			"mkdir -p .gjc/specs",
+			"cp source.md .gjc/specs/deep-interview-x.md",
+			"sed -i 's/a/b/' .gjc/plans/plan.md",
+			"cat source.md > .gjc/specs/deep-interview-x.md",
+		]) {
+			const decision = await getDeepInterviewMutationDecision({
+				cwd,
+				sessionId: "session-a",
+				tool: tool("bash"),
+				args: { command },
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toContain("runtime-owned");
+			expect(["gjc-target", "workflow-state-target"]).toContain(decision.reason ?? "");
+		}
+	});
+
 	it("blocks vim file-switches into .gjc", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveDeepInterview(cwd);
