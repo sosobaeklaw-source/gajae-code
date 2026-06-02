@@ -25,6 +25,7 @@ describe("GJC public CLI command surface", () => {
 			"team",
 			"ultragoal",
 			"ralplan",
+			"config",
 			"contribute-pr",
 			"deep-interview",
 			"update",
