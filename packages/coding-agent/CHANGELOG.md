@@ -6,6 +6,10 @@
 
 - Pruned bundled built-in themes to `red-claw` and `blue-crab`, with `blue-crab` now the default light-appearance theme.
 
+### Fixed
+
+- Fixed the skill HUD rail showing already-handed-off `deep-interview`/`ralplan` workflows: handoffs now supersede every same-session-scope row of the caller and callee skills (not just the exact `skill::session_id` key), and the visible-state read collapses to the most-recent row per skill before filtering inactive entries, so the HUD renders only the currently-active workflow and self-heals stale on-disk state.
+
 ## [0.2.4] - 2026-06-02
 
 ### Added

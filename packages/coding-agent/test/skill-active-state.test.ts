@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	applyHandoffToActiveState,
 	CANONICAL_GJC_WORKFLOW_SKILLS,
 	getSkillActiveStatePaths,
 	listActiveSkills,
@@ -144,6 +145,126 @@ describe("GJC skill-active state", () => {
 				severity: "success",
 			});
 			expect(entry?.hud?.details?.length).toBe(12);
+		});
+	});
+
+	it("shows only the callee when a skill is seeded session-less then handed off under a session", async () => {
+		await withTempCwd(async cwd => {
+			// `gjc deep-interview` run without --session-id seeds a global row, then
+			// the in-TUI skill chain hands off under a concrete session id. The
+			// demotion must supersede the global row so the HUD stops showing the
+			// already-handed-off skill.
+			await syncSkillActiveState({ cwd, skill: "deep-interview", phase: "interviewing", active: true });
+			await applyHandoffToActiveState({
+				cwd,
+				strict: true,
+				caller: {
+					cwd,
+					skill: "deep-interview",
+					active: false,
+					phase: "handoff",
+					sessionId: "sess1",
+					handoff_to: "ralplan",
+				},
+				callee: {
+					cwd,
+					skill: "ralplan",
+					active: true,
+					phase: "planner",
+					sessionId: "sess1",
+					handoff_from: "deep-interview",
+				},
+			});
+
+			const visible = await readVisibleSkillActiveState(cwd, "sess1");
+			expect(visible?.active_skills?.map(entry => entry.skill)).toEqual(["ralplan"]);
+		});
+	});
+
+	it("does not demote a same-skill row owned by a different session during handoff", async () => {
+		await withTempCwd(async cwd => {
+			await syncSkillActiveState({ cwd, skill: "ralplan", phase: "planner", active: true, sessionId: "sessB" });
+			await syncSkillActiveState({
+				cwd,
+				skill: "deep-interview",
+				phase: "interviewing",
+				active: true,
+				sessionId: "sessA",
+			});
+			await applyHandoffToActiveState({
+				cwd,
+				strict: true,
+				caller: {
+					cwd,
+					skill: "deep-interview",
+					active: false,
+					phase: "handoff",
+					sessionId: "sessA",
+					handoff_to: "ralplan",
+				},
+				callee: {
+					cwd,
+					skill: "ralplan",
+					active: true,
+					phase: "planner",
+					sessionId: "sessA",
+					handoff_from: "deep-interview",
+				},
+			});
+
+			const sessionA = await readVisibleSkillActiveState(cwd, "sessA");
+			const sessionB = await readVisibleSkillActiveState(cwd, "sessB");
+			expect(sessionA?.active_skills?.map(entry => entry.skill)).toEqual(["ralplan"]);
+			expect(sessionB?.active_skills?.map(entry => entry.skill)).toEqual(["ralplan"]);
+		});
+	});
+
+	it("self-heals a stale active row left in an on-disk state file", async () => {
+		await withTempCwd(async cwd => {
+			const { rootPath } = getSkillActiveStatePaths(cwd, "sess1");
+			await fs.mkdir(path.dirname(rootPath), { recursive: true });
+			await fs.writeFile(
+				rootPath,
+				JSON.stringify({
+					version: 1,
+					active: true,
+					skill: "deep-interview",
+					active_skills: [
+						{
+							skill: "deep-interview",
+							phase: "interviewing",
+							active: true,
+							updated_at: "2026-01-01T00:00:00.000Z",
+						},
+						{
+							skill: "deep-interview",
+							phase: "handoff",
+							active: false,
+							session_id: "sess1",
+							updated_at: "2026-01-01T00:01:00.000Z",
+							handoff_to: "ralplan",
+						},
+						{
+							skill: "ralplan",
+							phase: "handoff",
+							active: false,
+							session_id: "sess1",
+							updated_at: "2026-01-01T00:02:00.000Z",
+							handoff_to: "ultragoal",
+						},
+						{
+							skill: "ultragoal",
+							phase: "executing",
+							active: true,
+							session_id: "sess1",
+							updated_at: "2026-01-01T00:03:00.000Z",
+						},
+					],
+				}),
+			);
+
+			const visible = await readVisibleSkillActiveState(cwd, "sess1");
+			expect(visible?.active_skills?.map(entry => entry.skill)).toEqual(["ultragoal"]);
 		});
 	});
 
