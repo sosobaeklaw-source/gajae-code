@@ -11,14 +11,16 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
 	buildReceipt,
 	type CompletionEvidence,
+	type ReceiptEnvelope,
 	type ReceiptSubject,
 	type ValidationEvidence,
 	validateReceipt,
 } from "./receipts";
-import { writeReceiptImmutable } from "./storage";
+import { readReceiptIndex, writeReceiptImmutable } from "./storage";
 
 export interface ValidationCommandSpec {
 	name: string;
@@ -115,6 +117,21 @@ export async function runFinalize(opts: FinalizeOptions): Promise<FinalizeResult
 	// 3. PR / issue artifact.
 	const artifact = await opts.checks.prOrIssue();
 	if (opts.requirePr && !artifact.prUrl && !artifact.issueArtifact) blockers.push("missing-pr-or-issue");
+
+	// B4: cross-validate the persisted validation receipts (validity + commit freshness) before completion.
+	if (blockers.length === 0) {
+		const persisted = await readReceiptIndex(opts.root, opts.sessionId, "validation");
+		for (const id of validationReceiptIds) {
+			const entry = persisted.find(e => e.receiptId === id);
+			if (!entry) {
+				blockers.push(`missing-validation-receipt:${id}`);
+				continue;
+			}
+			const receipt = JSON.parse(await readFile(entry.path, "utf8")) as ReceiptEnvelope<ValidationEvidence>;
+			if (!validateReceipt(receipt).valid) blockers.push(`validation-receipt-invalid:${id}`);
+			else if (commit && receipt.evidence.commitUnderTest !== commit) blockers.push(`validation-stale-commit:${id}`);
+		}
+	}
 
 	if (blockers.length > 0) {
 		return {

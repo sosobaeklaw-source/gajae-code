@@ -151,4 +151,13 @@ describe("operate() autonomous lifecycle (AC-9 e2e + data-loss + red-team)", () 
 		expect(res.blockers.some(b => b.startsWith("validation-failed:"))).toBe(true);
 		expect(await readReceiptIndex(root, SID, "completion")).toHaveLength(0);
 	});
+
+	it("B3: never finalizes on loop-exhaustion without an observed completion", async () => {
+		const observer = scriptedObserver([obs({ ownerLive: true, observedSignals: ["working"] })]);
+		const res = await operate("spin without completing", { ...baseOpts(observer), maxIterations: 3 });
+		expect(res.completed).toBe(false);
+		expect(res.lifecycle).toBe("blocked");
+		expect(res.blockers).toContain("no-observed-completion");
+		expect(await readReceiptIndex(root, SID, "completion")).toHaveLength(0);
+	});
 });

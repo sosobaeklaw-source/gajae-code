@@ -178,6 +178,13 @@ export async function operate(goal: string, opts: OperateOptions): Promise<Opera
 		return { completed: false, lifecycle, iterations, classifications, vanishReceiptIds, blockers };
 	}
 
+	// B3: never finalize on loop-exhaustion — require an explicit observed completion.
+	if (lifecycle !== "finalizing") {
+		blockers.push("no-observed-completion");
+		await emit("critical", "operate_blocked", { blockers });
+		return { completed: false, lifecycle: "blocked", iterations, classifications, vanishReceiptIds, blockers };
+	}
+
 	const finalize = await runFinalize({
 		root: opts.root,
 		sessionId: opts.sessionId,
