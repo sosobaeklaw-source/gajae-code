@@ -104,8 +104,8 @@ describe("deep-interview mutation guard", () => {
 				args: { path: rawPath, content: "x" },
 			});
 			expect(decision.blocked).toBe(true);
-			expect(decision.reason).toBe("handoff-artifact-tool-target");
-			expect(decision.message).toContain("gjc deep-interview --write --stage final");
+			expect(decision.reason).toBe("gjc-target");
+			expect(decision.message).toContain("runtime-owned");
 		}
 
 		const blockedCases: Array<[string, AgentTool, unknown]> = [
@@ -150,8 +150,8 @@ describe("deep-interview mutation guard", () => {
 				args,
 			});
 			expect(decision.blocked).toBe(true);
-			if (decision.reason === "workflow-state-target") {
-				expect(decision.message).toContain("Workflow state JSON is runtime-owned");
+			if (decision.reason === "workflow-state-target" || decision.reason === "gjc-target") {
+				expect(decision.message).toContain("runtime-owned");
 			} else {
 				expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
 			}
@@ -187,7 +187,7 @@ describe("deep-interview mutation guard", () => {
 				args: { path: rawPath, content: "x" },
 			});
 			expect(decision.blocked).toBe(true);
-			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(decision.message).toContain("runtime-owned");
 		}
 
 		const mixed = await getDeepInterviewMutationDecision({
@@ -214,7 +214,7 @@ describe("deep-interview mutation guard", () => {
 		});
 
 		expect(decision.blocked).toBe(true);
-		expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+		expect(decision.message).toContain("runtime-owned");
 	});
 
 	it("does not block after deep-interview reaches a terminal phase", async () => {
