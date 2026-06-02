@@ -236,6 +236,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	isInitialized = false;
 	isBackgrounded = false;
 	isBashMode = false;
+	isBashNoContext = false;
 	toolOutputExpanded = false;
 	todoExpanded = false;
 	planModeEnabled = false;
@@ -809,9 +810,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	updateEditorChrome(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
+			const prefix = this.isBashNoContext
+				? `${theme.fg("warning", theme.bold("!"))}${theme.fg("bashMode", theme.bold("$ "))}`
+				: theme.fg("bashMode", theme.bold("$ "));
+			this.editor.setInputPrefix(prefix);
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+			this.editor.setInputPrefix(undefined);
 		} else {
+			this.editor.setInputPrefix(undefined);
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
 			const hex = sessionName ? getSessionAccentHex(sessionName) : undefined;

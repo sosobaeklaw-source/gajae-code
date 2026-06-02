@@ -28,6 +28,9 @@ function isExpandable(obj: unknown): obj is Expandable {
 }
 
 export class InputController {
+	#normalizingShellPrefix = false;
+	#bashExcludeFromContext = false;
+
 	constructor(private ctx: InteractiveModeContext) {}
 
 	#abortInteractive(): Promise<void> {
@@ -64,6 +67,8 @@ export class InputController {
 			} else if (this.ctx.isBashMode) {
 				this.ctx.editor.setText("");
 				this.ctx.isBashMode = false;
+				this.ctx.isBashNoContext = false;
+				this.#bashExcludeFromContext = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (this.ctx.session.isEvalRunning) {
 				this.ctx.session.abortEval();
@@ -171,15 +176,57 @@ export class InputController {
 		}
 
 		this.ctx.editor.onChange = (text: string) => {
+			if (this.#normalizingShellPrefix) return;
+
 			const wasBashMode = this.ctx.isBashMode;
+			const wasBashNoContext = this.ctx.isBashNoContext;
 			const wasPythonMode = this.ctx.isPythonMode;
+			const shellNormalized = this.#normalizeShellModeInput(text);
+			if (shellNormalized !== undefined) {
+				this.#normalizingShellPrefix = true;
+				this.ctx.editor.setText(shellNormalized);
+				this.#normalizingShellPrefix = false;
+				this.ctx.updateEditorBorderColor();
+				return;
+			}
+
+			if (this.ctx.isBashMode) {
+				this.ctx.isPythonMode = false;
+				return;
+			}
+
 			const trimmed = text.trimStart();
-			this.ctx.isBashMode = text.trimStart().startsWith("!");
+			this.ctx.isBashMode = false;
+			this.ctx.isBashNoContext = false;
+			this.#bashExcludeFromContext = false;
 			this.ctx.isPythonMode = trimmed.startsWith("$") && !trimmed.startsWith("${");
-			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
+			if (
+				wasBashMode !== this.ctx.isBashMode ||
+				wasBashNoContext !== this.ctx.isBashNoContext ||
+				wasPythonMode !== this.ctx.isPythonMode
+			) {
 				this.ctx.updateEditorBorderColor();
 			}
 		};
+	}
+
+	#normalizeShellModeInput(text: string): string | undefined {
+		const trimmed = text.trimStart();
+		if (!this.ctx.isBashMode) {
+			if (!trimmed.startsWith("!")) return undefined;
+			this.ctx.isBashMode = true;
+			this.ctx.isPythonMode = false;
+			this.#bashExcludeFromContext = trimmed.startsWith("!!");
+			this.ctx.isBashNoContext = this.#bashExcludeFromContext;
+			return trimmed.slice(this.#bashExcludeFromContext ? 2 : 1).trimStart();
+		}
+
+		if (trimmed.startsWith("!")) {
+			this.#bashExcludeFromContext = true;
+			this.ctx.isBashNoContext = true;
+			return trimmed.slice(1).trimStart();
+		}
+		return undefined;
 	}
 
 	setupEditorSubmitHandler(): void {
@@ -225,6 +272,24 @@ export class InputController {
 			}
 
 			if (!text) return;
+
+			if (this.ctx.isBashMode) {
+				const command = text.trim();
+				if (!command) return;
+				if (this.ctx.session.isBashRunning) {
+					this.ctx.showWarning("A bash command is already running. Press Esc to cancel it first.");
+					this.ctx.editor.setText(command);
+					return;
+				}
+				this.ctx.editor.addToHistory(`${this.#bashExcludeFromContext ? "!!" : "!"}${command}`);
+				this.ctx.isBashNoContext = this.#bashExcludeFromContext;
+				await this.ctx.handleBashCommand(command, this.#bashExcludeFromContext);
+				this.ctx.isBashMode = false;
+				this.ctx.isBashNoContext = false;
+				this.#bashExcludeFromContext = false;
+				this.ctx.updateEditorBorderColor();
+				return;
+			}
 
 			// Handle built-in slash commands
 			const slashResult = await executeBuiltinSlashCommand(text, {
