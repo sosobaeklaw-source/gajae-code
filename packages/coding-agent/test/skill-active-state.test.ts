@@ -297,6 +297,87 @@ describe("GJC skill-active state", () => {
 		});
 	});
 
+	it("keeps an active session-scoped row visible despite a newer session-less inactive same-skill row", async () => {
+		await withTempCwd(async cwd => {
+			// A session-less (global) deep-interview row was handed off (inactive,
+			// newest), but the current session still has its own active interview.
+			// Session ownership must win so the mutation guard still sees it.
+			const { rootPath } = getSkillActiveStatePaths(cwd, "sess1");
+			await fs.mkdir(path.dirname(rootPath), { recursive: true });
+			await fs.writeFile(
+				rootPath,
+				JSON.stringify({
+					version: 1,
+					active: true,
+					skill: "deep-interview",
+					active_skills: [
+						{
+							skill: "deep-interview",
+							phase: "interviewing",
+							active: true,
+							session_id: "sess1",
+							updated_at: "2026-01-01T00:00:00.000Z",
+						},
+						{
+							skill: "deep-interview",
+							phase: "handoff",
+							active: false,
+							updated_at: "2026-01-01T00:09:00.000Z",
+							handoff_to: "ralplan",
+						},
+					],
+				}),
+			);
+
+			const visible = await readVisibleSkillActiveState(cwd, "sess1");
+			expect(visible?.active_skills?.map(entry => entry.skill)).toEqual(["deep-interview"]);
+		});
+	});
+
+	it("does not let an inactive same-skill row without a valid timestamp hide an active row", async () => {
+		await withTempCwd(async cwd => {
+			// Root read (no session scope) with two same-skill rows that carry no
+			// trustworthy timestamp. The active row must win the tie instead of an
+			// inactive row suppressing it by merge order.
+			const { rootPath } = getSkillActiveStatePaths(cwd);
+			await fs.mkdir(path.dirname(rootPath), { recursive: true });
+			await fs.writeFile(
+				rootPath,
+				JSON.stringify({
+					version: 1,
+					active: true,
+					skill: "deep-interview",
+					active_skills: [
+						{ skill: "deep-interview", phase: "interviewing", active: true, session_id: "a" },
+						{ skill: "deep-interview", phase: "handoff", active: false, session_id: "b" },
+					],
+				}),
+			);
+
+			const visible = await readVisibleSkillActiveState(cwd);
+			expect(visible?.active_skills?.map(entry => entry.skill)).toEqual(["deep-interview"]);
+			expect(visible?.active_skills?.[0]?.phase).toBe("interviewing");
+		});
+	});
+
+	it("surfaces legacy top-level active state through the visible read", async () => {
+		await withTempCwd(async cwd => {
+			// Pre-`active_skills` state files stored a single workflow at the top
+			// level with no `active_skills` array. The raw visible read must still
+			// surface it for the HUD, mutation guard, and caller inference.
+			const { rootPath } = getSkillActiveStatePaths(cwd);
+			await fs.mkdir(path.dirname(rootPath), { recursive: true });
+			await fs.writeFile(
+				rootPath,
+				JSON.stringify({ version: 1, active: true, skill: "deep-interview", phase: "intent-first" }),
+			);
+
+			const visible = await readVisibleSkillActiveState(cwd);
+			expect(visible?.active_skills?.map(entry => entry.skill)).toEqual(["deep-interview"]);
+			expect(visible?.active_skills?.[0]?.phase).toBe("intent-first");
+		});
+	});
+
 	it("keeps the canonical GJC workflow skill set intentionally small", () => {
 		expect(CANONICAL_GJC_WORKFLOW_SKILLS).toEqual(["deep-interview", "ralplan", "ultragoal", "team"]);
 	});
