@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added runtime-enforced Ultragoal executor QA/red-team evidence matrices for completion checkpoints, with plan-first contract coverage, user-surface evidence, adversarial cases, artifact references, scoped Executor red-team guidance, and focused rejection tests for shallow or contradictory QA evidence.
+
 ## [0.2.5] - 2026-06-02
 
 ### Added

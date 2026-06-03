@@ -44,6 +44,56 @@ function passingQualityGate(): string {
 			evidence: "executor built and ran e2e plus red-team QA suite",
 			e2eCommands: ["bun test:e2e"],
 			redTeamCommands: ["bun test:red-team"],
+			artifactRefs: [
+				{
+					id: "browser-run",
+					kind: "browser-automation",
+					path: "artifacts/browser-run.json",
+					description: "Playwright/Pandawright browser run that invokes the approved user-facing flow",
+				},
+				{
+					id: "gui-screenshot",
+					kind: "screenshot",
+					path: "artifacts/gui-screenshot.png",
+					description: "Screenshot evidence for the GUI/web surface verdict",
+				},
+				{
+					id: "adversarial-report",
+					kind: "failure-mode-test",
+					path: "artifacts/adversarial-report.txt",
+					description: "Adversarial boundary and failure-mode test output",
+				},
+			],
+			contractCoverage: [
+				{
+					id: "contract-goal",
+					contractRef: "approved-plan:goal",
+					obligation: "The completed story satisfies the approved user-facing contract",
+					status: "covered",
+					surfaceEvidenceRefs: ["surface-gui"],
+					adversarialCaseRefs: ["case-invalid-input"],
+				},
+			],
+			surfaceEvidence: [
+				{
+					id: "surface-gui",
+					surface: "gui/web",
+					contractRef: "approved-plan:goal",
+					invocation: "Open the user-facing flow in a browser and verify the visible result",
+					verdict: "passed",
+					artifactRefs: ["browser-run", "gui-screenshot"],
+				},
+			],
+			adversarialCases: [
+				{
+					id: "case-invalid-input",
+					contractRef: "approved-plan:goal",
+					scenario: "Submit invalid or boundary input through the user-facing surface",
+					expectedBehavior: "The implementation rejects or handles the case according to the approved contract",
+					verdict: "passed",
+					artifactRefs: ["adversarial-report"],
+				},
+			],
 			blockers: [],
 		},
 		iteration: {
@@ -66,6 +116,40 @@ function goalSnapshot(objective: string, status = "active", updatedAt = Date.now
 			updatedAt,
 		},
 	});
+}
+function mutateQualityGate(mutator: (gate: Record<string, Record<string, unknown>>) => void): string {
+	const gate = JSON.parse(passingQualityGate()) as Record<string, Record<string, unknown>>;
+	mutator(gate);
+	return JSON.stringify(gate);
+}
+
+async function expectRejectedCompleteGate(
+	root: string,
+	created: { gjcObjective: string },
+	qualityGateJson: string,
+): Promise<string> {
+	const beforeGoals = await Bun.file(path.join(root, ".gjc", "ultragoal", "goals.json")).text();
+	const beforeLedger = await Bun.file(path.join(root, ".gjc", "ultragoal", "ledger.jsonl")).text();
+	const result = await runNativeUltragoalCommand(
+		[
+			"checkpoint",
+			"--goal-id",
+			"G001",
+			"--status",
+			"complete",
+			"--evidence",
+			"tests passed",
+			"--gjc-goal-json",
+			goalSnapshot(created.gjcObjective),
+			"--quality-gate-json",
+			qualityGateJson,
+		],
+		root,
+	);
+	expect(result.status).toBe(1);
+	expect(await Bun.file(path.join(root, ".gjc", "ultragoal", "goals.json")).text()).toBe(beforeGoals);
+	expect(await Bun.file(path.join(root, ".gjc", "ultragoal", "ledger.jsonl")).text()).toBe(beforeLedger);
+	return result.stderr ?? "";
 }
 
 function goalToolSnapshot(objective: string, status = "active", updatedAt = Date.now()): string {
@@ -376,6 +460,146 @@ describe("native GJC ultragoal runtime", () => {
 		expect(dirtyBlockers.stderr).toContain("executorQa.blockers");
 		expect(await Bun.file(path.join(root, ".gjc", "ultragoal", "goals.json")).text()).toBe(beforeGoals);
 		expect(await Bun.file(path.join(root, ".gjc", "ultragoal", "ledger.jsonl")).text()).toBe(beforeLedger);
+	});
+
+	it("requires runtime-validated executor QA red-team matrix sections", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const missingMatrix = mutateQualityGate(gate => {
+			delete gate.executorQa!.contractCoverage;
+		});
+		const emptyMatrix = mutateQualityGate(gate => {
+			gate.executorQa!.surfaceEvidence = [];
+		});
+
+		const missingMatrixError = await expectRejectedCompleteGate(root, created, missingMatrix);
+		const emptyMatrixError = await expectRejectedCompleteGate(root, created, emptyMatrix);
+
+		expect(missingMatrixError).toContain("executorQa.contractCoverage");
+		expect(emptyMatrixError).toContain("executorQa.surfaceEvidence");
+	});
+
+	it("rejects fake or unlinked executor QA red-team evidence before mutation", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const missingArtifactMetadata = mutateQualityGate(gate => {
+			const refs = gate.executorQa!.artifactRefs as Array<Record<string, unknown>>;
+			delete refs[0]!.kind;
+		});
+		const missingSurfaceArtifact = mutateQualityGate(gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0]!.artifactRefs = ["missing-artifact"];
+		});
+		const missingCoverageLink = mutateQualityGate(gate => {
+			const coverage = gate.executorQa!.contractCoverage as Array<Record<string, unknown>>;
+			coverage[0]!.surfaceEvidenceRefs = ["missing-surface"];
+		});
+
+		const artifactError = await expectRejectedCompleteGate(root, created, missingArtifactMetadata);
+		const surfaceError = await expectRejectedCompleteGate(root, created, missingSurfaceArtifact);
+		const coverageError = await expectRejectedCompleteGate(root, created, missingCoverageLink);
+
+		expect(artifactError).toContain("executorQa.artifactRefs[0].kind");
+		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].artifactRefs");
+		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs");
+	});
+
+	it("enforces not-applicable and GUI/web artifact compatibility rules", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const notApplicableWithoutReason = mutateQualityGate(gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0] = {
+				id: "surface-gui",
+				surface: "gui/web",
+				contractRef: "approved-plan:goal",
+				status: "not_applicable",
+			};
+		});
+		const adversarialNotApplicable = mutateQualityGate(gate => {
+			const cases = gate.executorQa!.adversarialCases as Array<Record<string, unknown>>;
+			cases[0]!.status = "not_applicable";
+		});
+		const guiWithCliOnlyArtifact = mutateQualityGate(gate => {
+			const refs = gate.executorQa!.artifactRefs as Array<Record<string, unknown>>;
+			refs[0]!.kind = "cli-log";
+			refs[1]!.kind = "terminal-transcript";
+		});
+
+		const notApplicableError = await expectRejectedCompleteGate(root, created, notApplicableWithoutReason);
+		const adversarialError = await expectRejectedCompleteGate(root, created, adversarialNotApplicable);
+		const guiError = await expectRejectedCompleteGate(root, created, guiWithCliOnlyArtifact);
+
+		expect(notApplicableError).toContain("executorQa.surfaceEvidence[0].reason");
+		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+		expect(guiError).toContain("GUI/web surfaces");
+	});
+
+	it("rejects failed executor QA matrix row outcomes before mutation", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const failedSurfaceVerdict = mutateQualityGate(gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0]!.verdict = "failed";
+		});
+		const failedAdversarialResult = mutateQualityGate(gate => {
+			const cases = gate.executorQa!.adversarialCases as Array<Record<string, unknown>>;
+			delete cases[0]!.verdict;
+			cases[0]!.result = "failed";
+		});
+
+		const surfaceError = await expectRejectedCompleteGate(root, created, failedSurfaceVerdict);
+		const adversarialError = await expectRejectedCompleteGate(root, created, failedAdversarialResult);
+
+		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].status");
+		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+	});
+
+	it("rejects contradictory passed status with failed executor QA outcomes", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const passedStatusFailedSurface = mutateQualityGate(gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0]!.status = "passed";
+			surfaceEvidence[0]!.verdict = "failed";
+		});
+		const passedStatusFailedAdversarial = mutateQualityGate(gate => {
+			const cases = gate.executorQa!.adversarialCases as Array<Record<string, unknown>>;
+			cases[0]!.status = "passed";
+			cases[0]!.result = "failed";
+		});
+
+		const surfaceError = await expectRejectedCompleteGate(root, created, passedStatusFailedSurface);
+		const adversarialError = await expectRejectedCompleteGate(root, created, passedStatusFailedAdversarial);
+
+		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].status");
+		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+	});
+
+	it("rejects covered contracts linked only to not-applicable surface evidence", async () => {
+		const root = await tempDir();
+		const created = await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const notApplicableOnlyProof = mutateQualityGate(gate => {
+			const surfaceEvidence = gate.executorQa!.surfaceEvidence as Array<Record<string, unknown>>;
+			surfaceEvidence[0] = {
+				id: "surface-gui",
+				contractRef: "approved-plan:goal",
+				status: "not_applicable",
+				reason: "GUI is not part of this story",
+			};
+			const coverage = gate.executorQa!.contractCoverage as Array<Record<string, unknown>>;
+			delete coverage[0]!.adversarialCaseRefs;
+		});
+
+		const coverageError = await expectRejectedCompleteGate(root, created, notApplicableOnlyProof);
+
+		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs.surface-gui.status");
 	});
 
 	it("requires a fresh goal get snapshot for complete checkpoints", async () => {
