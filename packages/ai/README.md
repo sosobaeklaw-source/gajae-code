@@ -1063,14 +1063,15 @@ The quickest way to authenticate:
 bunx @gajae-code/ai login              # interactive provider selection
 bunx @gajae-code/ai login anthropic    # login to specific provider
 bunx @gajae-code/ai login vllm         # store vLLM API key (or placeholder for local no-auth)
+bunx @gajae-code/ai login xai          # store an xAI API key
 bunx @gajae-code/ai list               # list available providers
 ```
 
-Credentials are saved to `agent.db` in the agent directory. `/login qianfan` opens the Qianfan console and stores the pasted API key.
+Credentials are saved to `agent.db` in the agent directory. `/login qianfan` opens the Qianfan console and stores the pasted API key; `/login xai` stores a pasted xAI API key rather than browser OAuth credentials.
 
 `login` supports OAuth providers (Anthropic, OpenAI code provider, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
-For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
+For the current API-key onboarding flows, the library covers xAI, Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
 
 ### Programmatic OAuth
 

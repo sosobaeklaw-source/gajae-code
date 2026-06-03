@@ -61,6 +61,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "xai",
+		name: "xAI",
+		available: true,
+	},
+	{
 		id: "fireworks",
 		name: "Fireworks",
 		available: true,
@@ -321,6 +326,7 @@ export async function refreshOAuthToken(
 		case "nvidia":
 		case "nanogpt":
 		case "synthetic":
+		case "xai":
 		case "together":
 		case "litellm":
 		case "lm-studio":

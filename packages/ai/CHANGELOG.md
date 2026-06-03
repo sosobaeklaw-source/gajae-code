@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added xAI to the `/login` API-key provider catalog so users can store xAI credentials with `login xai` in addition to `XAI_API_KEY`.
+
 ## [0.2.4] - 2026-06-02
 
 ### Added

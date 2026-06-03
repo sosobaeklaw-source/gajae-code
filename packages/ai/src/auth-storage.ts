@@ -1484,6 +1484,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "xai": {
+				const { loginXai } = await import("./utils/oauth/xai");
+				const apiKey = await loginXai(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "fireworks": {
 				const { loginFireworks } = await import("./utils/oauth/fireworks");
 				const apiKey = await loginFireworks(ctrl);
