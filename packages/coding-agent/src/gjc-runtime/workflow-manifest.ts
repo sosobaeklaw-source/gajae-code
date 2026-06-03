@@ -308,7 +308,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalGjcWorkflowSkill, SkillManifest>
 		],
 		verbs: [
 			...stateVerbs(),
-			...positionalVerbs(["start", "list", "status", "resume", "shutdown", "api"]),
+			...positionalVerbs(["start", "list", "status", "monitor", "resume", "shutdown", "api"]),
 			...plannedVerbs(PLANNED_ADMIN_VERBS),
 		],
 		typedArgs: [

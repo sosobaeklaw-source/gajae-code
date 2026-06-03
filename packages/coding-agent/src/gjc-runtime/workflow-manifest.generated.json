@@ -1023,6 +1023,10 @@
         "surface": "command-positional"
       },
       {
+        "name": "monitor",
+        "surface": "command-positional"
+      },
+      {
         "name": "resume",
         "surface": "command-positional"
       },
