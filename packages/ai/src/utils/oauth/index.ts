@@ -315,6 +315,11 @@ export async function refreshOAuthToken(
 			newCredentials = await refreshCursorToken(credentials.refresh);
 			break;
 		}
+		case "xai": {
+			const { refreshXaiToken } = await import("./xai");
+			newCredentials = await refreshXaiToken(credentials.refresh);
+			break;
+		}
 		case "kilo":
 		case "perplexity":
 		case "huggingface":
@@ -326,7 +331,6 @@ export async function refreshOAuthToken(
 		case "nvidia":
 		case "nanogpt":
 		case "synthetic":
-		case "xai":
 		case "together":
 		case "litellm":
 		case "lm-studio":
