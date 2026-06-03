@@ -147,6 +147,7 @@ interface StringDef {
 interface NumberDef {
 	type: "number";
 	default: number;
+	validate?: (value: number) => boolean;
 	ui?: UiNumber;
 }
 
@@ -318,6 +319,12 @@ export const SETTINGS_SCHEMA = {
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
+
+	"gjc.deepInterview.ambiguityThreshold": {
+		type: "number",
+		default: 0.05,
+		validate: (value: number) => Number.isFinite(value) && value > 0 && value <= 1,
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Appearance
@@ -2530,6 +2537,7 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: [
 			"auto",
+			"duckduckgo",
 			"exa",
 			"brave",
 			"jina",
@@ -2554,7 +2562,12 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Preferred web-search provider",
+					description: "Active model's native search if its creds exist, else keyless DuckDuckGo",
+				},
+				{
+					value: "duckduckgo",
+					label: "DuckDuckGo",
+					description: "Keyless default — no API key or OAuth required",
 				},
 				{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set" },
 				{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },

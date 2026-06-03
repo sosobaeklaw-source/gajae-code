@@ -9,6 +9,13 @@ export const WORKFLOW_STATE_RECEIPT_FRESH_MS = 30 * 60 * 1000;
 export type WorkflowStateMutationOwner = "gjc-state-cli" | "gjc-runtime" | "gjc-hook";
 export type WorkflowStateReceiptStatus = "fresh" | "stale";
 
+export interface WorkflowStateContentChecksum {
+	algorithm: "sha256";
+	value: string;
+	covered_path: string;
+	computed_at: string;
+}
+
 export interface WorkflowStateReceipt {
 	version: 1;
 	skill: CanonicalGjcWorkflowSkill;
@@ -20,6 +27,25 @@ export interface WorkflowStateReceipt {
 	fresh_until: string;
 	status: WorkflowStateReceiptStatus;
 	mutation_id: string;
+	verb?: string;
+	from_phase?: string;
+	to_phase?: string;
+	forced?: boolean;
+	paths?: string[];
+	content_sha256?: WorkflowStateContentChecksum;
+}
+
+export interface AuditEntry {
+	ts: string;
+	skill?: string;
+	category: string;
+	verb: string;
+	owner: WorkflowStateMutationOwner;
+	mutation_id: string;
+	from_phase?: string;
+	to_phase?: string;
+	forced: boolean;
+	paths: string[];
 }
 
 function safeString(value: unknown): string {

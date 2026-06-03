@@ -167,6 +167,7 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { buildGjcRuntimeSessionEnv, consumePendingGoalModeRequest } from "../gjc-runtime/goal-mode-request";
+import { writeArtifact } from "../gjc-runtime/state-writer";
 import { requestGjcWorkerIntegrationAttempt } from "../gjc-runtime/team-runtime";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
@@ -263,7 +264,14 @@ export type AgentSessionEvent =
 			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
 			skipped?: boolean;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			unbounded?: boolean;
+	  }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
@@ -281,6 +289,11 @@ export type AgentSessionEvent =
  * `gjc state` runtime selector resolver.
  */
 const SAFE_PATH_COMPONENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
+
+function isUnderProjectGjc(cwd: string, targetPath: string): boolean {
+	const relative = path.relative(path.join(path.resolve(cwd), ".gjc"), path.resolve(targetPath));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -629,7 +642,11 @@ function createHandoffFileName(date = new Date()): string {
 // ============================================================================
 
 /** Tools that require user permission before execution when an ACP client is connected. */
-const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "edit", "delete", "move"]);
+const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "monitor", "edit", "delete", "move"]);
+
+function isShellExecutionPermissionTool(toolName: string): boolean {
+	return toolName === "bash" || toolName === "monitor";
+}
 
 /** Permission options presented to the client on each gated tool call. */
 const PERMISSION_OPTIONS: ClientBridgePermissionOption[] = [
@@ -694,7 +711,7 @@ function getPermissionIntent(
 	args: unknown,
 ): { toolName: string; title: string; paths?: string[]; cacheKey: string } | undefined {
 	const a = args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
-	if (toolName === "bash") {
+	if (isShellExecutionPermissionTool(toolName)) {
 		const cmd = getStringProperty(a, "command")?.slice(0, 80);
 		return { toolName, title: cmd || toolName, cacheKey: toolName };
 	}
@@ -848,6 +865,7 @@ export class AgentSession {
 
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
+	#retryNowRequested = false;
 	#retryAttempt = 0;
 	#retryPromise: Promise<void> | undefined = undefined;
 	#retryResolve: (() => void) | undefined = undefined;
@@ -1497,7 +1515,13 @@ export class AgentSession {
 	 */
 	#cancelOwnAsyncJobs(): void {
 		if (!this.#agentId) return;
-		AsyncJobManager.instance()?.cancelAll({ ownerId: this.#agentId });
+		const manager = AsyncJobManager.instance();
+		if (!manager) return;
+		// Run owner cleanups first so cron timers (and any other owner-scoped
+		// resource cleanup) cannot register fresh jobs while we tear down the
+		// existing ones. Cleanup callbacks are error-isolated inside the manager.
+		manager.runOwnerCleanups({ ownerId: this.#agentId });
+		manager.cancelAll({ ownerId: this.#agentId });
 	}
 
 	// =========================================================================
@@ -1877,6 +1901,15 @@ export class AgentSession {
 						attempt: this.#retryAttempt,
 					});
 					this.#retryAttempt = 0;
+					// Settle the retry gate here, colocated with the success event, rather
+					// than relying on the generic #resolveRetry() at the end of the
+					// agent_end branch. That tail resolver is bypassed by every early
+					// return in agent_end (successful `yield`, handoff-abort skip-maintenance,
+					// missing assistant message), so a retry that recovers on a yield turn
+					// would otherwise leave #retryPromise unresolved — wedging
+					// #waitForPostPromptRecovery and the session as permanently busy.
+					// #resolveRetry() is idempotent, so the later tail call is a no-op.
+					this.#resolveRetry();
 				}
 			}
 
@@ -1990,6 +2023,18 @@ export class AgentSession {
 			if (this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(msg);
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
+			}
+			if (this.#retryAttempt > 0) {
+				// A prior retry ended on a non-retryable (terminal) message: emit
+				// the terminal retry-end and reset so observers clear retry state.
+				const attempt = this.#retryAttempt;
+				this.#retryAttempt = 0;
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: msg.errorMessage,
+				});
 			}
 			this.#resolveRetry();
 
@@ -2861,6 +2906,7 @@ export class AgentSession {
 				maxAttempts: event.maxAttempts,
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
+				unbounded: event.unbounded,
 			});
 		} else if (event.type === "auto_retry_end") {
 			await this.#extensionRunner.emit({
@@ -3395,8 +3441,9 @@ export class AgentSession {
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
+					const isShellExecutionTool = isShellExecutionPermissionTool(target.name);
 					const command =
-						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
+						isShellExecutionTool && args && typeof args === "object" && !Array.isArray(args)
 							? getStringProperty(args as Record<string, unknown>, "command")
 							: undefined;
 					const commandContent = command
@@ -3426,7 +3473,7 @@ export class AgentSession {
 								toolCallId,
 								toolName: target.name,
 								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
+								...(isShellExecutionTool ? { kind: "execute" } : {}),
 								status: "pending",
 								rawInput: args,
 								...(commandContent ? { content: commandContent } : {}),
@@ -3474,7 +3521,7 @@ export class AgentSession {
 	 * prompts or tool execution can run.
 	 */
 	#wrapToolForDeepInterviewMutationGuard<T extends AgentTool>(tool: T): T {
-		if (!["edit", "write", "ast_edit"].includes(tool.name)) return tool;
+		if (!["edit", "write", "ast_edit", "bash"].includes(tool.name)) return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return Reflect.get(target, prop, target);
@@ -5016,7 +5063,18 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
-	async abort(options?: { goalReason?: "interrupted" | "internal"; timeoutMs?: number }): Promise<void> {
+	async abort(options?: {
+		goalReason?: "interrupted" | "internal";
+		timeoutMs?: number;
+		cause?:
+			| "user_interrupt"
+			| "new_session"
+			| "session_switch"
+			| "compaction"
+			| "handoff"
+			| "tool_abort"
+			| "internal";
+	}): Promise<void> {
 		this.abortRetry();
 		this.#promptGeneration++;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -5062,6 +5120,18 @@ export class AgentSession {
 		// so any requeue callback still fires and the queue stays consistent.
 		if (this.#toolChoiceQueue.hasInFlight) {
 			this.#toolChoiceQueue.reject("aborted");
+		}
+
+		// Steer-on-interrupt: after a genuine user interrupt, resume with any
+		// queued steering instead of going idle. Lifecycle/teardown causes
+		// (default "internal") suppress this; new-session/handoff additionally
+		// clear the steering queue, and compaction resumes via its own path.
+		if ((options?.cause ?? "internal") === "user_interrupt" && this.agent.hasQueuedSteering()) {
+			this.#scheduleAgentContinue({
+				delayMs: 1,
+				generation: this.#promptGeneration,
+				shouldContinue: () => this.agent.hasQueuedSteering(),
+			});
 		}
 	}
 
@@ -5920,7 +5990,14 @@ export class AgentSession {
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());
 					try {
-						await Bun.write(handoffFilePath, `${handoffText}\n`);
+						if (isUnderProjectGjc(this.sessionManager.getCwd(), handoffFilePath)) {
+							await writeArtifact(handoffFilePath, `${handoffText}\n`, {
+								cwd: this.sessionManager.getCwd(),
+								audit: { category: "artifact", verb: "write", owner: "gjc-runtime" },
+							});
+						} else {
+							await Bun.write(handoffFilePath, `${handoffText}\n`);
+						}
 						savedPath = handoffFilePath;
 					} catch (error) {
 						logger.warn("Failed to save handoff document to disk", {
@@ -7110,19 +7187,14 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable (transient errors or usage limits).
-	 * Context overflow errors are NOT retryable (handled by compaction instead).
-	 * Usage-limit errors are retryable because the retry handler performs credential switching.
+	 * Whether an error should be retried. Uses the ordered classifier:
+	 * context-overflow routes to compaction; clearly-terminal coded errors
+	 * (auth/400/not-found) surface immediately; usage-limit, transient, and
+	 * unknown/no-code errors are retryable.
 	 */
 	#isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-		// Context overflow is handled by compaction, not retry
-		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
-
-		const err = message.errorMessage;
-		return this.#isTransientErrorMessage(err) || isUsageLimitError(err);
+		const classification = this.#classifyErrorForRetry(message);
+		return classification === "usage_limit" || classification === "transient" || classification === "unknown";
 	}
 
 	#isTransientErrorMessage(errorMessage: string): boolean {
@@ -7146,6 +7218,37 @@ export class AgentSession {
 				errorMessage,
 			)
 		);
+	}
+
+	#isTerminalErrorMessage(errorMessage: string): boolean {
+		// Errors that will never succeed on retry (auth/permission, malformed
+		// request, unknown/unsupported model). These surface immediately rather
+		// than retry forever.
+		return /\b(401|402|403|404|413|422)\b|unauthorized|forbidden|authentication_error|permission_error|permission denied|invalid api key|invalid_request_error|invalid request|bad request|bad_request|validation_error|unprocessable|payload too large|payment required|insufficient_quota|insufficient credits|missing required (parameter|field)|invalid schema|invalid tool_choice|unsupported (parameter|value|model)|model_not_found|no such model|unknown model|does not (exist|support)|request was aborted|request aborted|the user aborted/i.test(
+			errorMessage,
+		);
+	}
+
+	/**
+	 * Ordered retry classification: overflow (compaction) -> terminal (surface)
+	 * -> usage_limit (rotation) -> transient (retry) -> unknown (retry).
+	 */
+	#classifyErrorForRetry(
+		message: AssistantMessage,
+	): "none" | "overflow" | "terminal" | "usage_limit" | "transient" | "unknown" {
+		if (message.stopReason !== "error" || !message.errorMessage) return "none";
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (isContextOverflow(message, contextWindow)) return "overflow";
+		const err = message.errorMessage;
+		// Stream-envelope errors are only transient in the pre-message_start
+		// variant; any other envelope failure is structural and must surface.
+		if (/anthropic stream envelope error:/i.test(err)) {
+			return this.#isTransientEnvelopeErrorMessage(err) ? "transient" : "terminal";
+		}
+		if (this.#isTerminalErrorMessage(err)) return "terminal";
+		if (isUsageLimitError(err)) return "usage_limit";
+		if (this.#isTransientErrorMessage(err)) return "transient";
+		return "unknown";
 	}
 
 	#getRetryFallbackChains(): RetryFallbackChains {
@@ -7417,6 +7520,8 @@ export class AgentSession {
 	async #handleRetryableError(message: AssistantMessage): Promise<boolean> {
 		const retrySettings = this.settings.getGroup("retry");
 		if (!retrySettings.enabled) return false;
+		const retryClassification = this.#classifyErrorForRetry(message);
+		const unboundedClass = retryClassification === "transient" || retryClassification === "unknown";
 
 		const generation = this.#promptGeneration;
 		this.#retryAttempt++;
@@ -7429,7 +7534,7 @@ export class AgentSession {
 			this.#retryResolve = resolve;
 		}
 
-		if (this.#retryAttempt > retrySettings.maxRetries) {
+		if (!unboundedClass && this.#retryAttempt > retrySettings.maxRetries) {
 			// Max retries exceeded, emit final failure and reset
 			await this.#emitSessionEvent({
 				type: "auto_retry_end",
@@ -7486,7 +7591,16 @@ export class AgentSession {
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		if (unboundedClass && !switchedCredential && !switchedModel) {
+			// Retry forever: honor a provider-supplied wait, otherwise cap the
+			// exponential backoff at the ceiling instead of giving up.
+			if (parsedRetryAfterMs !== undefined) {
+				delayMs = Math.max(delayMs, parsedRetryAfterMs);
+			} else if (maxDelayMs > 0) {
+				delayMs = Math.min(delayMs, maxDelayMs);
+			}
+		}
+		if (!unboundedClass && maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
 			await this.#emitSessionEvent({
@@ -7499,12 +7613,22 @@ export class AgentSession {
 			return false;
 		}
 
+		// Create and install the backoff abort controller BEFORE emitting
+		// auto_retry_start, so a synchronous retryNow()/abortRetry() invoked from
+		// an event subscriber (e.g. the TUI Esc handler) is not lost in the gap
+		// between the event and the controller assignment.
+		const retryAbortController = new AbortController();
+		this.#retryAbortController?.abort();
+		this.#retryAbortController = retryAbortController;
+		this.#retryNowRequested = false;
+
 		await this.#emitSessionEvent({
 			type: "auto_retry_start",
 			attempt: this.#retryAttempt,
 			maxAttempts: retrySettings.maxRetries,
 			delayMs,
 			errorMessage,
+			unbounded: unboundedClass,
 		});
 
 		// Remove error message from agent state (keep in session for history)
@@ -7514,34 +7638,49 @@ export class AgentSession {
 		}
 
 		// Wait with exponential backoff (abortable).
-		const retryAbortController = new AbortController();
-		this.#retryAbortController?.abort();
-		this.#retryAbortController = retryAbortController;
 		try {
 			await scheduler.wait(delayMs, { signal: retryAbortController.signal });
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
 			}
-			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
 			this.#retryAbortController = undefined;
-			await this.#emitSessionEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this.#resolveRetry();
-			return false;
+			if (this.#retryNowRequested) {
+				// Retry-now: skip the remaining backoff and fall through to
+				// re-attempt immediately (keeps the retry session alive).
+				this.#retryNowRequested = false;
+			} else {
+				// Aborted during sleep (cancel) - emit end event so UI can clean up
+				const attempt = this.#retryAttempt;
+				this.#retryAttempt = 0;
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: "Retry cancelled",
+				});
+				this.#resolveRetry();
+				return false;
+			}
 		}
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
 		}
 
 		// Retry via continue() outside the agent_end event callback chain.
-		this.#scheduleAgentContinue({ delayMs: 1, generation });
+		// If the scheduled continue cannot run — it throws (e.g. AgentBusyError from a
+		// concurrent turn, or "Cannot continue ...") or is skipped because a newer
+		// generation took over — the agent_end that normally resolves #retryPromise
+		// never arrives. Finalize the retry in that case so #waitForPostPromptRecovery
+		// (and the in-flight prompt holding it open) cannot wedge the session as
+		// permanently busy, which would turn every later prompt() into a
+		// non-recoverable AgentBusyError loop.
+		this.#scheduleAgentContinue({
+			delayMs: 1,
+			generation,
+			onError: () => this.#failRetryRecovery("Retry continuation failed to start"),
+			onSkip: () => this.#failRetryRecovery("Retry continuation was superseded"),
+		});
 
 		return true;
 	}
@@ -7550,8 +7689,41 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
+		this.#retryNowRequested = false;
 		this.#retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
+		// Note: #retryAttempt is reset in the catch block of #handleRetryableError
+		this.#resolveRetry();
+	}
+
+	/**
+	 * Skip the current retry backoff and re-attempt immediately. Distinct from
+	 * abortRetry(), which cancels the retry and returns to idle. No-op when no
+	 * retry backoff is active.
+	 */
+	retryNow(): void {
+		if (!this.#retryAbortController) return;
+		this.#retryNowRequested = true;
+		this.#retryAbortController.abort();
+	}
+
+	/**
+	 * Finalize a pending auto-retry that can no longer reach a resolving agent_end
+	 * (the scheduled continue threw or was superseded). Without this, #retryPromise
+	 * stays unresolved, #waitForPostPromptRecovery never returns, the owning
+	 * prompt's in-flight count is never released, and the session reports
+	 * `isStreaming === true` forever — turning every later prompt() into a
+	 * non-recoverable AgentBusyError. No-op once the retry has already settled.
+	 */
+	#failRetryRecovery(reason: string): void {
+		if (!this.#retryPromise) return;
+		const attempt = this.#retryAttempt;
+		this.#retryAttempt = 0;
+		void this.#emitSessionEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: reason,
+		});
 		this.#resolveRetry();
 	}
 
@@ -8273,6 +8445,7 @@ export class AgentSession {
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.agent.clearAllQueues();
 
 		try {
 			await this.sessionManager.setSessionFile(sessionPath);
