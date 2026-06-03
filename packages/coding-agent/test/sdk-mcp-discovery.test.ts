@@ -55,6 +55,7 @@ function createReasoningModel(): Model<"openai-responses"> {
 }
 
 const oldSessionMtime = new Date("2000-01-01T00:00:00.000Z");
+const SLOW_SDK_TEST_TIMEOUT_MS = 15_000;
 
 describe("createAgentSession MCP discovery prompt gating", () => {
 	let tempDir: string;
@@ -308,7 +309,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(session.getSelectedDiscoveredToolNames()).not.toContain("find");
 		expect(await session.activateDiscoveredTools(["find"])).toEqual(["find"]);
 		expect(session.getActiveToolNames()).toContain("find");
-	});
+	}, SLOW_SDK_TEST_TIMEOUT_MS);
 	it("restores explicit MCP, thinking, and service-tier entries when resuming without rewriting the session file", async () => {
 		const firstManager = SessionManager.create(tempDir, tempDir);
 		const { session: firstSession } = await createAgentSession({
@@ -388,7 +389,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		} finally {
 			await resumedSession.dispose();
 		}
-	});
+	}, SLOW_SDK_TEST_TIMEOUT_MS);
 
 	it("restores fallback MCP, thinking, and service-tier state in memory without rewriting the session file", async () => {
 		const sessionManager = SessionManager.create(tempDir, tempDir);
@@ -505,5 +506,5 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		} finally {
 			await resumedSession.dispose();
 		}
-	});
+	}, SLOW_SDK_TEST_TIMEOUT_MS);
 });

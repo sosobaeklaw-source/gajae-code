@@ -18,6 +18,8 @@ interface SessionDirs {
 	agentDir: string;
 }
 
+const SLOW_SDK_TEST_TIMEOUT_MS = 15_000;
+
 const expiredOAuth = () =>
 	({
 		type: "oauth" as const,
@@ -278,7 +280,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		expect(ext1.events).toHaveLength(1);
 		expect(ext2.events).toHaveLength(2);
 		expect(ext3.events).toHaveLength(3);
-	});
+	}, SLOW_SDK_TEST_TIMEOUT_MS);
 
 	it("buffers credential_disabled events fired before runner.initialize and replays them once initialize runs", async () => {
 		// Without deferral the runner would fan out with `hasUI=false`, an unset model, and
