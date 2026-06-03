@@ -32,7 +32,7 @@ import { getDefault, type SettingPath, Settings, settings } from "./config/setti
 import { initializeWithSettings } from "./discovery";
 import { exportFromFile } from "./export/html";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
-import { InteractiveMode, runAcpMode, runPrintMode, runRpcMode } from "./modes";
+import { InteractiveMode, runAcpMode, runBridgeMode, runPrintMode, runRpcMode } from "./modes";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import type { MCPManager } from "./runtime-mcp";
@@ -707,21 +707,35 @@ export async function runRootCommand(
 		process.exit(0);
 	}
 
-	if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {
-		process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
+	if (
+		(parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "bridge") &&
+		parsedArgs.fileArgs.length > 0
+	) {
+		process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC or bridge mode")}\n`);
 		process.exit(1);
 	}
 
 	const cwd = getProjectDir();
 	const settingsInstance = deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd }));
-	if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "acp") {
+	if (
+		parsedArgs.mode === "rpc" ||
+		parsedArgs.mode === "rpc-ui" ||
+		parsedArgs.mode === "acp" ||
+		parsedArgs.mode === "bridge"
+	) {
 		applyRpcDefaultSettingOverrides(settingsInstance);
 	}
 	modelRegistry.applyConfiguredModelBindings(settingsInstance);
 	if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 		Bun.env.PI_NO_PTY = "1";
 	}
-	if (parsedArgs.noTitle || parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "acp") {
+	if (
+		parsedArgs.noTitle ||
+		parsedArgs.mode === "rpc" ||
+		parsedArgs.mode === "rpc-ui" ||
+		parsedArgs.mode === "acp" ||
+		parsedArgs.mode === "bridge"
+	) {
 		Bun.env.PI_NO_TITLE = "1";
 	}
 	const { pipedInput, fileText, fileImages } = await logger.time("prepareInitialMessage", async () => {
@@ -894,6 +908,8 @@ export async function runRootCommand(
 
 		if (mode === "rpc" || mode === "rpc-ui") {
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined);
+		} else if (mode === "bridge") {
+			await runBridgeMode(session, setToolUIContext);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);

@@ -186,7 +186,12 @@ export class RpcClient {
 			cwd: this.options.cwd,
 			env: { ...Bun.env, ...this.options.env },
 			stdin: "pipe",
+			stderr: "full",
 		});
+		const startupStderrPromise = this.#process.stderr
+			? new Response(this.#process.stderr).text().catch(() => "")
+			: Promise.resolve("");
+		const getStartupStderr = async () => this.#process?.peekStderr() || (await startupStderrPromise);
 
 		// Wait for the "ready" signal or process exit
 		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
@@ -203,10 +208,20 @@ export class RpcClient {
 				}
 				this.#handleLine(line);
 			}
-			// Stream ended without ready signal — process exited
+			// Stream ended without ready signal — process exited. Wait for the
+			// managed process wrapper so stderr is fully drained before reporting.
 			if (!readySettled) {
-				readySettled = true;
-				readyReject(new Error(`Agent process exited before ready. Stderr: ${this.#process?.peekStderr() ?? ""}`));
+				const proc = this.#process;
+				const exitCode = proc ? await proc.exited.catch(() => proc.exitCode ?? -1) : undefined;
+				if (!readySettled) {
+					const stderr = await getStartupStderr();
+					readySettled = true;
+					readyReject(
+						new Error(
+							`Agent process exited${exitCode === undefined ? "" : ` with code ${exitCode}`} before ready. Stderr: ${stderr}`,
+						),
+					);
+				}
 			}
 		})().catch((err: Error) => {
 			if (!readySettled) {
@@ -216,12 +231,12 @@ export class RpcClient {
 		});
 
 		// Also race against process exit (in case stdout closes before we read it)
-		void this.#process.exited.then((exitCode: number) => {
+		void this.#process.exited.then(async (exitCode: number) => {
 			if (!readySettled) {
+				const stderr = await getStartupStderr();
+				if (readySettled) return;
 				readySettled = true;
-				readyReject(
-					new Error(`Agent process exited with code ${exitCode}. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-				);
+				readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${stderr}`));
 			}
 		});
 
@@ -229,9 +244,9 @@ export class RpcClient {
 		const readyTimeout = this.#startTimeout(30000, () => {
 			if (readySettled) return;
 			readySettled = true;
-			readyReject(
-				new Error(`Timeout waiting for agent to become ready. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-			);
+			void getStartupStderr().then(stderr => {
+				readyReject(new Error(`Timeout waiting for agent to become ready. Stderr: ${stderr}`));
+			});
 		});
 
 		try {
