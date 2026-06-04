@@ -41,6 +41,7 @@ import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { ExtensionDashboard } from "../components/extensions";
 import { HistorySearchComponent } from "../components/history-search";
+import { JobsOverlayComponent } from "../components/jobs-overlay";
 import { ModelSelectorComponent, type ModelSelectorSelection } from "../components/model-selector";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
@@ -55,6 +56,7 @@ import { ThemeSelectorComponent } from "../components/theme-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
+import type { JobsObserver } from "../jobs-observer";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const CALLBACK_SERVER_PROVIDERS = new Set<string>([
@@ -1148,6 +1150,33 @@ export class SelectorController {
 			margin: 0,
 		});
 		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Jobs overlay: navigate ongoing monitor + cron jobs (Monitors then Crons,
+	 * newest-first), drill into per-type detail, and cancel/delete with a y/N
+	 * confirm. Built from nested SelectLists (list -> detail -> confirm) so focus
+	 * stays on the active SelectList.
+	 */
+	showJobsOverlay(observer: JobsObserver): void {
+		let overlay: JobsOverlayComponent | undefined;
+		const close = () => {
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.ui.setFocus(this.ctx.editor);
+			this.ctx.ui.requestRender();
+		};
+		overlay = new JobsOverlayComponent(observer, {
+			close,
+			requestRender: () => {
+				if (overlay) this.ctx.ui.setFocus(overlay.getFocus());
+				this.ctx.ui.requestRender();
+			},
+		});
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(overlay);
+		this.ctx.ui.setFocus(overlay.getFocus());
 		this.ctx.ui.requestRender();
 	}
 }
