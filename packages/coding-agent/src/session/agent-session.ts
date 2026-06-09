@@ -71,8 +71,10 @@ import {
 	clearAnthropicFastModeFallback,
 	getSupportedEfforts,
 	isContextOverflow,
+	isUnrecoverableContextOverflow,
 	isUsageLimitError,
 	modelsAreEqual,
+	parseContextOverflowLimits,
 	parseRateLimitReason,
 	resolveServiceTier,
 	streamSimple,
@@ -6488,6 +6490,17 @@ export class AgentSession {
 				return;
 			}
 
+			// Compaction cannot help when the overflow is in the retained/initial prompt
+			// (system prompt + tool schemas) rather than conversation history — e.g. a
+			// local llama.cpp / LM Studio server launched with an n_ctx far smaller than
+			// the GJC system prompt (n_keep >= n_ctx). Compacting + retrying loops forever
+			// and eventually stalls/crashes the session, so surface an actionable terminal
+			// diagnostic instead of entering that loop.
+			if (isUnrecoverableContextOverflow(assistantMessage)) {
+				this.#emitContextWindowTooSmallNotice(assistantMessage, contextWindow);
+				return;
+			}
+
 			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
@@ -6513,6 +6526,48 @@ export class AgentSession {
 				await this.#runAutoCompaction("threshold", false);
 			}
 		}
+	}
+	/**
+	 * Surface a clear, actionable diagnostic when the active model's backing
+	 * server cannot hold even the retained/initial prompt. This is the terminal
+	 * outcome for an unrecoverable context overflow (see
+	 * {@link isUnrecoverableContextOverflow}); the only fixes are operator-side
+	 * (raise the server context window) or selecting a larger-context model, so
+	 * we stop the otherwise-infinite compaction/retry loop and tell the user how
+	 * to recover instead of letting the session stall out.
+	 */
+	#emitContextWindowTooSmallNotice(assistantMessage: AssistantMessage, configuredWindow: number): void {
+		const limits = parseContextOverflowLimits(assistantMessage.errorMessage);
+		const serverWindow = limits?.contextSize;
+		const requiredTokens = limits?.keepTokens;
+		const modelLabel = this.model ? `${this.model.provider}/${this.model.id}` : "the active model";
+		const parts = [
+			`${modelLabel}'s server context window is too small for the GJC prompt and cannot be recovered by compaction.`,
+		];
+		if (serverWindow !== undefined && requiredTokens !== undefined) {
+			parts.push(
+				`The server reported n_ctx=${serverWindow} but the retained prompt needs at least ${requiredTokens} tokens.`,
+			);
+		} else if (serverWindow !== undefined) {
+			parts.push(`The server reported a context window of only ${serverWindow} tokens.`);
+		}
+		if (configuredWindow > 0 && serverWindow !== undefined && serverWindow < configuredWindow) {
+			parts.push(
+				`This model is configured for ${configuredWindow} tokens, so the backing server was likely launched with a smaller window than its descriptor advertises.`,
+			);
+		}
+		parts.push(
+			"Fix: increase the server context size (e.g. llama-server/llama.cpp `--ctx-size`, LM Studio context length) or switch to a larger-context model.",
+		);
+		const message = parts.join(" ");
+		logger.error("Unrecoverable context overflow: server window too small", {
+			model: modelLabel,
+			serverWindow,
+			requiredTokens,
+			configuredWindow,
+			errorMessage: assistantMessage.errorMessage,
+		});
+		this.emitNotice("error", message, "context-overflow");
 	}
 	#assistantEndedWithSuccessfulYield(assistantMessage: AssistantMessage): boolean {
 		const toolCallId = this.#lastSuccessfulYieldToolCallId;

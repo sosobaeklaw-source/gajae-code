@@ -135,3 +135,63 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 export function getOverflowPatterns(): RegExp[] {
 	return [...OVERFLOW_PATTERNS];
 }
+
+/**
+ * Patterns for context-overflow refusals that compaction CANNOT recover from,
+ * because the overflow is in the retained/initial portion of the prompt (system
+ * prompt + tool schemas) rather than the conversation history.
+ *
+ * llama.cpp / LM Studio raise this when the tokens they must KEEP from the
+ * initial prompt (`n_keep`) already meet or exceed the server context window
+ * (`n_ctx`) — e.g. a local server launched with `--ctx-size 4096` while the GJC
+ * system prompt alone is ~37k tokens. Shrinking conversation history does
+ * nothing here, so retry/compaction loops forever and eventually crashes the
+ * session. Treat these as terminal and surface an actionable remediation.
+ */
+const UNRECOVERABLE_OVERFLOW_PATTERNS = [
+	/tokens? to keep from the initial prompt is greater than the context length/i, // llama.cpp / LM Studio
+	/\bn_keep\b\s*[:=]?\s*\d+\s*>=?\s*\bn_ctx\b/i, // llama.cpp "n_keep: X >= n_ctx: Y"
+];
+
+/**
+ * Returns true when a context-overflow error is unrecoverable by compaction:
+ * the kept/initial prompt portion alone meets or exceeds the model's usable
+ * context window. The only fixes are increasing the server context window
+ * (`--ctx-size` / `n_ctx`) or moving to a larger-context model — never
+ * compacting conversation history.
+ */
+export function isUnrecoverableContextOverflow(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error" || !message.errorMessage) return false;
+	const err = message.errorMessage;
+	if (UNRECOVERABLE_OVERFLOW_PATTERNS.some(p => p.test(err))) return true;
+	// Fall back to parsed limits: kept tokens already >= server window.
+	const limits = parseContextOverflowLimits(err);
+	return (
+		limits?.keepTokens !== undefined && limits.contextSize !== undefined && limits.keepTokens >= limits.contextSize
+	);
+}
+
+/** Parsed numeric limits extracted from a context-overflow error message. */
+export interface ContextOverflowLimits {
+	/** Server-reported usable context window (`n_ctx` / "context length"), if present. */
+	contextSize?: number;
+	/** Tokens the server must retain from the initial prompt (`n_keep`), if present. */
+	keepTokens?: number;
+}
+
+/**
+ * Best-effort extraction of the server's real context window and required kept
+ * tokens from a provider context-overflow error. Powers actionable diagnostics
+ * (the configured model descriptor often advertises a far larger window than
+ * the backing server was actually launched with). Returns `undefined` when no
+ * numbers can be parsed.
+ */
+export function parseContextOverflowLimits(errorMessage: string | undefined): ContextOverflowLimits | undefined {
+	if (!errorMessage) return undefined;
+	const result: ContextOverflowLimits = {};
+	const nCtx = /\bn_ctx\b\s*[:=]?\s*(\d+)/i.exec(errorMessage);
+	if (nCtx) result.contextSize = Number(nCtx[1]);
+	const nKeep = /\bn_keep\b\s*[:=]?\s*(\d+)/i.exec(errorMessage);
+	if (nKeep) result.keepTokens = Number(nKeep[1]);
+	return result.contextSize === undefined && result.keepTokens === undefined ? undefined : result;
+}

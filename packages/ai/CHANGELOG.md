@@ -21,6 +21,9 @@
 
 - Pinned the OpenAI Codex provider default to GPT-5.5 at `xhigh` reasoning effort (#352). This changes the default model and effort for Codex users (latency/cost/quality impact) and is a behavior change, not an API break; pass an explicit model/effort to override.
 - Bumped the spoofed Gemini CLI user-agent version to 0.45.2 to track the upstream release.
+### Added
+
+- Added `isUnrecoverableContextOverflow()` and `parseContextOverflowLimits()` to distinguish context-overflow refusals that compaction cannot fix (the retained/initial prompt alone meets or exceeds the server window, e.g. llama.cpp/LM Studio `n_keep >= n_ctx`) from recoverable history overflow, and to extract the server's real `n_ctx`/`n_keep` for actionable diagnostics.
 
 ## [0.3.0] - 2026-06-03
 

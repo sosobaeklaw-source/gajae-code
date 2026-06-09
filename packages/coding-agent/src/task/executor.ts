@@ -13,7 +13,7 @@ import { type JsonSchemaValidationIssue, validateJsonSchemaValue } from "@gajae-
 import { logger, prompt, untilAborted } from "@gajae-code/utils";
 import { AsyncJobManager } from "../async";
 import { ModelRegistry } from "../config/model-registry";
-import { resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
+import { resolveModelOverride, resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
@@ -40,6 +40,7 @@ import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { estimateSubagentInitialPromptTokens, subagentModelContextFits } from "./subagent-context-guard";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -1107,8 +1108,47 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					resolvedModel: model.id,
 				});
 			}
-			if (model?.contextWindow && model.contextWindow > 0) {
-				progress.contextWindow = model.contextWindow;
+			let resolvedModel = model;
+			if (resolvedModel) {
+				const estimatedInitialPromptTokens = estimateSubagentInitialPromptTokens({
+					task,
+					assignment,
+					context: options.context,
+					forkContextTokens: options.forkContextSeed?.metadata.approximateTokens,
+				});
+				if (!subagentModelContextFits(resolvedModel.contextWindow, estimatedInitialPromptTokens)) {
+					const parentPattern = options.parentActiveModelPattern;
+					const parentModel = parentPattern
+						? resolveModelOverride([parentPattern], modelRegistry, settings).model
+						: undefined;
+					const parentIsDifferent =
+						parentModel !== undefined &&
+						(parentModel.provider !== resolvedModel.provider || parentModel.id !== resolvedModel.id);
+					if (
+						parentModel &&
+						parentIsDifferent &&
+						subagentModelContextFits(parentModel.contextWindow, estimatedInitialPromptTokens)
+					) {
+						logger.warn(
+							"Subagent model context window too small for initial prompt; falling back to parent model",
+							{
+								requested: `${resolvedModel.provider}/${resolvedModel.id}`,
+								requestedContextWindow: resolvedModel.contextWindow ?? 0,
+								estimatedPromptTokens: estimatedInitialPromptTokens,
+								fallback: `${parentModel.provider}/${parentModel.id}`,
+								fallbackContextWindow: parentModel.contextWindow ?? 0,
+							},
+						);
+						resolvedModel = parentModel;
+					} else {
+						throw new Error(
+							`Subagent "${agent.name}" resolved to model ${resolvedModel.provider}/${resolvedModel.id} with context window ${resolvedModel.contextWindow ?? 0} tokens, too small for its estimated initial prompt (~${estimatedInitialPromptTokens} tokens). Pin this agent to a larger-context model (agent "model:" or a settings model override) or raise the model's context length, and avoid forking large context / inlining big briefings into subagents (pass large payloads via local:// references).`,
+						);
+					}
+				}
+			}
+			if (resolvedModel?.contextWindow && resolvedModel.contextWindow > 0) {
+				progress.contextWindow = resolvedModel.contextWindow;
 			}
 			const effectiveThinkingLevel = explicitThinkingLevel
 				? resolvedThinkingLevel
@@ -1172,7 +1212,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					authStorage,
 					modelRegistry,
 					settings: subagentSettings,
-					model,
+					model: resolvedModel,
 					thinkingLevel: effectiveThinkingLevel,
 					toolNames,
 					outputSchema,

@@ -127,6 +127,18 @@ struct HeadTailOutcome {
 	last_idx: usize,
 }
 
+/// brush-parser reports source positions as **character** indices (its cursor
+/// advances once per `char`), not byte offsets. Slicing `cmd` with a raw
+/// character index panics on multi-byte UTF-8 (e.g. Korean) and silently
+/// mis-edits otherwise. Map a character index to its byte offset within `cmd`;
+/// the char count itself maps to `cmd.len()`. Returns `None` when out of range.
+fn char_byte_offset(cmd: &str, char_idx: usize) -> Option<usize> {
+	cmd.char_indices()
+		.map(|(b, _)| b)
+		.chain(std::iter::once(cmd.len()))
+		.nth(char_idx)
+}
+
 fn try_strip_head_tail(
 	p: &Pipeline,
 	cmd: &str,
@@ -154,7 +166,12 @@ fn try_strip_head_tail(
 	// span under-reports when its suffix contains unlocated `IoRedirect`s
 	// (e.g. the synthetic `2>&1` inserted by `|&`).
 	let bytes = cmd.as_bytes();
-	let last_start = last_loc.start.index;
+	let Some(last_start) = char_byte_offset(cmd, last_loc.start.index) else {
+		return default;
+	};
+	let Some(last_end) = char_byte_offset(cmd, last_loc.end.index) else {
+		return default;
+	};
 	let Some(head) = cmd.get(..last_start) else {
 		return default;
 	};
@@ -172,7 +189,7 @@ fn try_strip_head_tail(
 	// Reported text starts at the pipe and is right-trimmed. The deletion
 	// range walks back through any leading whitespace so the rewrite is
 	// contiguous.
-	let stripped_text = cmd[pipe_pos..last_loc.end.index].trim_end().to_owned();
+	let stripped_text = cmd[pipe_pos..last_end].trim_end().to_owned();
 	if stripped_text.is_empty() {
 		return default;
 	}
@@ -180,7 +197,7 @@ fn try_strip_head_tail(
 	while delete_start > 0 && matches!(bytes[delete_start - 1], b' ' | b'\t') {
 		delete_start -= 1;
 	}
-	ranges.push((delete_start, last_loc.end.index));
+	ranges.push((delete_start, last_end));
 	stripped.push(stripped_text);
 	HeadTailOutcome { stripped: true, last_idx: n - 2 }
 }
@@ -259,6 +276,10 @@ fn try_strip_2to1(
 			anchor = anchor.max(loc.end.index);
 		}
 	}
+	// `anchor` is a character index; convert to a byte offset before slicing.
+	let Some(anchor) = char_byte_offset(cmd, anchor) else {
+		return;
+	};
 	let bytes = cmd.as_bytes();
 	let mut pos = anchor;
 	while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
@@ -448,6 +469,27 @@ mod tests {
 			let (cmd, stripped) = run(input);
 			assert_eq!(cmd, *input, "input: {input:?}");
 			assert!(stripped.is_empty(), "input: {input:?}");
+		}
+	}
+
+	#[test]
+	fn handles_multibyte_utf8_without_panicking() {
+		// brush-parser reports character indices; before the byte-offset fix
+		// these slices landed inside a UTF-8 sequence and panicked.
+		let cases: &[(&str, &str, &[&str])] = &[
+			("echo '산재의 증거' | head", "echo '산재의 증거'", &["| head"]),
+			("grep -oE '으' file | head -5", "grep -oE '으' file", &["| head -5"]),
+			("echo '한글' 2>&1", "echo '한글'", &["2>&1"]),
+			(
+				"echo '현장을 아는 눈으로' 2>&1 | tail -3",
+				"echo '현장을 아는 눈으로'",
+				&["| tail -3", "2>&1"],
+			),
+		];
+		for (input, want_cmd, want_stripped) in cases {
+			let (cmd, stripped) = run(input);
+			assert_eq!(cmd, *want_cmd, "input: {input:?}");
+			assert_eq!(stripped, *want_stripped, "input: {input:?}");
 		}
 	}
 }

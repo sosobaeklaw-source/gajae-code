@@ -58,6 +58,10 @@
 - Fixed harness session lookup testability without changing runtime owner-routing behavior.
 - Prevented release catalog file specs from recursing during catalog resolution (#351).
 - Reconciled the ultragoal skill mode-state and HUD with the plan/ledger so status reflects real goal progress (#342/#346).
+### Fixed
+
+- Fixed the main agent loop entering an unrecoverable compaction/retry loop (surfacing as repeated `stream stalled` errors and eventually crashing the session) when the active model's backing server context window is smaller than the GJC system prompt. When a context overflow is detected in the retained/initial prompt (`n_keep >= n_ctx`, e.g. a local llama.cpp/LM Studio server launched with `--ctx-size 4096`), the session now stops compacting (which can never shrink the system prompt below the window), surfaces a clear actionable notice with the server's real `n_ctx`/required tokens, and recommends raising the server context size or switching to a larger-context model — after still attempting context promotion to a larger model first.
+- Added a context-window preflight to subagent dispatch so a council/task whose resolved model cannot hold its estimated initial prompt (system prompt + tool schemas + assignment + forked snapshot) auto-recovers to the parent session's larger-context model, or fails with a clear, actionable error, instead of hitting a raw provider context-overflow refusal (e.g. LM Studio/llama.cpp `n_ctx 4096`) that aborts the whole batch.
 
 ## [0.3.2] - 2026-06-05
 
