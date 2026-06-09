@@ -34,7 +34,7 @@ Subagents have no conversation history. Every fact, file path, and direction the
 
 <rules>
 - HARD runtime gate: calls with more than 4 tasks are rejected before any child launches unless `spawnPlan` is complete.
-- Reviewer->explore gate: a `reviewer` spawning `explore` is rejected before launch unless `spawnPlan` is complete, even for a single task.
+- Reviewer→explore gate: a `reviewer` spawning `explore` is rejected before launch unless `spawnPlan` is complete, even for a single task.
 - NEVER assign tasks to run project-wide build/test/lint. Caller verifies after the batch.
 - **Subagents do not verify, lint, or format.** Every assignment MUST instruct the subagent to skip all gates and formatters. You run them once at the end across the union of changed files — avoids redundant runs and racing formatter passes.
 {{#if ircEnabled}}

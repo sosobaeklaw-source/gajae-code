@@ -2,7 +2,7 @@ Lists, inspects, awaits, pauses, resumes, steers, or cancels detached task subag
 
 Task launches return immediately. Use this tool when you need direct control over those running subagents. Prefer `subagent` for task subagents; generic `job` remains available for non-subagent jobs and compatibility fallback access.
 
-`verbosity` controls output size: `receipt` (default) returns status metadata plus a single <=280-character result/error preview and an `agent://<id>` output ref when available; `preview` returns <=2000 characters; `full` returns <=12000 characters and requires explicit `ids`.
+`verbosity` controls output size: `receipt` (default) returns status metadata plus a single ≤280-character result/error preview and an `agent://<id>` output ref when available; `preview` returns ≤2000 characters; `full` returns ≤12000 characters and requires explicit `ids`.
 
 # Operations
 
