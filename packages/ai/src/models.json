@@ -68311,7 +68311,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 512000,
+			"contextWindow": 500000,
 			"maxTokens": 131072,
 			"compat": {
 				"supportsUsageInStreaming": false
@@ -68433,7 +68433,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 222222,
+			"contextWindow": 256000,
 			"maxTokens": 8888,
 			"compat": {
 				"supportsUsageInStreaming": false
@@ -68801,7 +68801,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 222222,
+			"contextWindow": 1000000,
 			"maxTokens": 8888,
 			"compat": {
 				"supportsUsageInStreaming": false
@@ -69076,7 +69076,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 222222,
+			"contextWindow": 256000,
 			"maxTokens": 8888,
 			"compat": {
 				"supportsUsageInStreaming": false
